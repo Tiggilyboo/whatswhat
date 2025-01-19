@@ -7,6 +7,7 @@ import (
 	"os/signal"
 
 	_ "github.com/mattn/go-sqlite3"
+
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/store/sqlstore"
 	"go.mau.fi/whatsmeow/types/events"
@@ -38,26 +39,31 @@ func eventHandler(evt interface{}) {
 
 type chatView struct {
 	*gtk.ScrolledWindow
-	ctx    context.Context
 	parent *whatsWhat
 	view   *gtk.Box
+	login  *gtk.Button
 
+	ctx    context.Context
 	cancel context.CancelFunc
 }
 
 type qrView struct {
 	*gtk.ScrolledWindow
-	ctx     context.Context
-	parent  *whatsWhat
-	view    *gtk.Box
-	qrImage *gtk.Image
+	parent      *whatsWhat
+	view        *gtk.Box
+	qrImage     *gtk.Image
+	qrChan      <-chan whatsmeow.QRChannelItem
+	description *gtk.Label
+	retry       *gtk.Button
 
+	ctx    context.Context
 	cancel context.CancelFunc
 }
 
 type ViewMessage struct {
-	view    View
-	payload interface{}
+	View    View
+	Payload interface{}
+	Error   error
 }
 
 type whatsWhat struct {
@@ -67,6 +73,7 @@ type whatsWhat struct {
 	back     *gtk.Button
 	client   *whatsmeow.Client
 	viewChan chan ViewMessage
+	ctx      context.Context
 
 	view struct {
 		*gtk.Stack
@@ -76,12 +83,20 @@ type whatsWhat struct {
 	}
 }
 
-func newChatView(ctx context.Context, ww *whatsWhat) *chatView {
+func newChatView(ww *whatsWhat) *chatView {
+	ctx, cancel := context.WithCancel(context.Background())
 	v := chatView{
 		ctx:    ctx,
+		cancel: cancel,
 		parent: ww,
 	}
 	v.view = gtk.NewBox(gtk.OrientationVertical, 0)
+
+	v.login = gtk.NewButtonWithLabel("Login")
+	v.login.ConnectClicked(func() {
+		ww.queueViewMessage(QrView, nil)
+	})
+	v.view.Append(v.login)
 
 	viewport := gtk.NewViewport(nil, nil)
 	viewport.SetScrollToFocus(true)
@@ -95,9 +110,11 @@ func newChatView(ctx context.Context, ww *whatsWhat) *chatView {
 	return &v
 }
 
-func newQrView(ctx context.Context, ww *whatsWhat) *qrView {
+func newQrView(ww *whatsWhat) *qrView {
+	ctx, cancel := context.WithCancel(context.Background())
 	v := qrView{
 		ctx:    ctx,
+		cancel: cancel,
 		parent: ww,
 	}
 	v.qrImage = gtk.NewImageFromIconName("image-missing-symbolic")
@@ -105,10 +122,16 @@ func newQrView(ctx context.Context, ww *whatsWhat) *qrView {
 	v.view = gtk.NewBox(gtk.OrientationVertical, 5)
 	v.view.Append(v.qrImage)
 
-	description := gtk.NewLabel("Scan the WhatsApp QR code on your phone to login")
-	description.SetVExpand(true)
-	description.SetVExpand(true)
-	v.view.Append(description)
+	v.description = gtk.NewLabel("Loading...")
+	v.description.SetVExpand(true)
+	v.description.SetVExpand(true)
+	v.view.Append(v.description)
+
+	v.retry = gtk.NewButtonFromIconName("update-symbolic")
+	v.retry.ConnectClicked(func() {
+		ww.queueViewMessage(QrView, nil)
+	})
+	v.view.Append(v.retry)
 
 	viewport := gtk.NewViewport(nil, nil)
 	viewport.SetScrollToFocus(true)
@@ -123,14 +146,17 @@ func newQrView(ctx context.Context, ww *whatsWhat) *qrView {
 }
 
 func newWhatsWhat(ctx context.Context, app *gtk.Application) (*whatsWhat, error) {
-	ww := whatsWhat{Application: app}
+	ww := whatsWhat{
+		Application: app,
+		ctx:         ctx,
+	}
 
 	ww.viewChan = make(chan ViewMessage, 10)
 	ww.view.Stack = gtk.NewStack()
 	ww.view.SetTransitionType(gtk.StackTransitionTypeSlideLeftRight)
 
-	ww.view.qr = newQrView(ctx, &ww)
-	ww.view.chats = newChatView(ctx, &ww)
+	ww.view.qr = newQrView(&ww)
+	ww.view.chats = newChatView(&ww)
 
 	ww.view.AddChild(ww.view.chats)
 	ww.view.AddChild(ww.view.qr)
@@ -161,23 +187,49 @@ func newWhatsWhat(ctx context.Context, app *gtk.Application) (*whatsWhat, error)
 
 func (ww *whatsWhat) consumeMessages() {
 	for msg := range ww.viewChan {
-		fmt.Println("consumeMessages: ", msg)
-
-		switch msg.view {
-		case ErrorView:
-			text := msg.payload.(string)
-			glib.IdleAdd(func() {
-				ww.ViewError("Error", text)
-			})
-		case ChatView:
-			glib.IdleAdd(func() {
+		glib.IdleAdd(func() {
+			fmt.Println("consumeMessages: ", msg)
+			switch msg.View {
+			case ErrorView:
+				ww.ViewError(&msg)
+			case QrView:
+				ww.ViewQrCode(&msg)
+			case ChatView:
 				ww.ViewChats()
-			})
-		case QrView:
-			code := msg.payload.(string)
-			glib.IdleAdd(func() {
-				ww.ViewQrCode(code)
-			})
+			}
+		})
+	}
+}
+
+func (ww *whatsWhat) consumeQrMessages() {
+	for {
+		select {
+		case <-ww.view.qr.ctx.Done():
+			if ww.view.qr.ctx.Err() != nil {
+				fmt.Println("QR context done, resetting channel")
+				// cancelled, reset context for future
+				ww.view.qr.ctx, ww.view.qr.cancel = context.WithCancel(context.Background())
+				ww.view.qr.qrChan = nil
+				return
+			}
+
+		case evt, ok := <-ww.view.qr.qrChan:
+			if !ok {
+				// channel closed, exit
+				fmt.Println("QR channel closed, exiting")
+				return
+			}
+			fmt.Println("QR channel received: ", evt)
+
+			if evt.Error != nil {
+				ww.queueViewMessage(QrView, evt.Error)
+				break
+			}
+			if evt.Event == "code" {
+				ww.queueViewMessage(QrView, evt.Code)
+			} else {
+				fmt.Println("Login event: ", evt.Event)
+			}
 		}
 	}
 }
@@ -185,57 +237,105 @@ func (ww *whatsWhat) consumeMessages() {
 func (ww *whatsWhat) ViewChats() {
 	fmt.Println("ViewChats: Invoked")
 
-	ww.window.SetTitle("WhatsWhat - Chats")
+	ww.window.SetTitle("WhatsWhat - Chat")
 	ww.view.SetVisibleChild(ww.view.chats)
 	ww.back.SetVisible(false)
 	ww.view.current = ChatView
 
-	if ww.client == nil {
+	if ww.client == nil || !ww.client.IsLoggedIn() {
+		ww.view.chats.login.SetVisible(true)
 		return
 	}
+
+	// Client is logged in!
+	fmt.Println("Logged in")
+	ww.view.chats.login.SetVisible(false)
 }
 
-func (ww *whatsWhat) ViewError(title string, message string) {
-	fmt.Println("ViewError: ", message)
+func (ww *whatsWhat) ViewError(msg *ViewMessage) {
+	fmt.Println("ViewError: ", msg)
 
 	messageBox := gtk.NewBox(gtk.OrientationVertical, 0)
-	text := gtk.NewLabel(message)
+
+	var text *gtk.Label
+	if msg.Error != nil {
+		text = gtk.NewLabel(msg.Error.Error())
+	} else {
+		text = gtk.NewLabel(fmt.Sprint(msg.Payload))
+	}
 	messageBox.Append(text)
 
-	ww.window.SetTitle(title)
+	ww.window.SetTitle("WhatsWhat - Message")
 	ww.view.SetVisibleChild(messageBox)
-	ww.back.SetVisible(false)
+	ww.back.SetVisible(true)
 	ww.view.current = ErrorView
 }
 
-func (ww *whatsWhat) ViewQrCode(code string) {
-	fmt.Println("ViewQrCode: ", code)
+func (ww *whatsWhat) ViewQrCode(msg *ViewMessage) {
+	fmt.Println("ViewQrCode: ", msg)
 
 	ww.view.current = QrView
 	if ww.view.qr.qrImage != nil {
 		ww.view.qr.view.Remove(ww.view.qr.qrImage)
 	}
 
+	if ww.view.qr.qrChan == nil {
+		var err error
+		ww.view.qr.qrChan, err = ww.client.GetQRChannel(ww.view.qr.ctx)
+		if err != nil {
+			ww.queueViewMessage(ErrorView, err)
+			return
+		}
+
+		if err = ww.client.Connect(); err != nil {
+			ww.queueViewMessage(ErrorView, err)
+			return
+		}
+
+		go ww.consumeQrMessages()
+	}
+
+	var code *string
+	if msg.Error != nil {
+		ww.view.qr.description.SetLabel(msg.Error.Error())
+		ww.view.qr.retry.SetVisible(true)
+		return
+	} else if msg.Payload == nil {
+		code = nil
+	} else {
+		codeStr := msg.Payload.(string)
+		code = &codeStr
+		ww.view.qr.description.SetLabel("Scan the WhatsApp QR code on your phone to login")
+		ww.view.qr.retry.SetVisible(false)
+	}
+
 	ww.window.SetTitle("WhatsApp - Login")
 	ww.back.SetVisible(true)
 
-	fmt.Println("Encoding qrcode bytes...")
-	var qrCodeBytes []byte
-	qrCodeBytes, err := qrcode.Encode(code, qrcode.Medium, 512)
-	if err != nil {
-		ww.queueViewMessage(ErrorView, err.Error())
-		return
-	}
+	var imageUi *gtk.Image
+	if code == nil {
+		fmt.Println("Empty code, load icon to show loading...")
 
-	fmt.Println("Making texture from QR code PNG bytes")
-	qrCodeGlibBytes := glib.NewBytes(qrCodeBytes)
-	texture, err := gdk.NewTextureFromBytes(qrCodeGlibBytes)
-	if err != nil {
-		ww.queueViewMessage(ErrorView, err.Error())
-		return
+		imageUi = gtk.NewImageFromIconName("image-missing-symbolic")
+	} else {
+		fmt.Println("Encoding qrcode bytes...")
+		var qrCodeBytes []byte
+		qrCodeBytes, err := qrcode.Encode(*code, qrcode.Medium, 512)
+		if err != nil {
+			ww.queueViewMessage(ErrorView, err.Error())
+			return
+		}
+
+		fmt.Println("Making texture from QR code PNG bytes")
+		qrCodeGlibBytes := glib.NewBytes(qrCodeBytes)
+		texture, err := gdk.NewTextureFromBytes(qrCodeGlibBytes)
+		if err != nil {
+			ww.queueViewMessage(ErrorView, err.Error())
+			return
+		}
+		fmt.Println("Making image from paintable texture")
+		imageUi = gtk.NewImageFromPaintable(texture)
 	}
-	fmt.Println("Making image from paintable texture")
-	imageUi := gtk.NewImageFromPaintable(texture)
 	imageUi.SetVExpand(true)
 	imageUi.SetHExpand(true)
 
@@ -255,9 +355,18 @@ func (ww *whatsWhat) Shutdown() {
 }
 
 func (ww *whatsWhat) queueViewMessage(view View, payload interface{}) {
+	var msgErr error
+	switch payload.(type) {
+	case error:
+		msgErr = payload.(error)
+		payload = nil
+	default:
+		msgErr = nil
+	}
 	ww.viewChan <- ViewMessage{
-		view:    view,
-		payload: payload,
+		View:    view,
+		Payload: payload,
+		Error:   msgErr,
 	}
 }
 
@@ -265,13 +374,13 @@ func (ww *whatsWhat) InitializeChat(ctx context.Context) {
 	dbLog := wlog.Stdout("Database", "DEBUG", true)
 	container, err := sqlstore.New("sqlite3", "file:whatswhat.db?_foreign_keys=on", dbLog)
 	if err != nil {
-		ww.queueViewMessage(ErrorView, err.Error())
+		ww.queueViewMessage(ErrorView, err)
 		return
 	}
 
 	deviceStore, err := container.GetFirstDevice()
 	if err != nil {
-		ww.queueViewMessage(ErrorView, err.Error())
+		ww.queueViewMessage(ErrorView, err)
 		return
 	}
 
@@ -281,22 +390,8 @@ func (ww *whatsWhat) InitializeChat(ctx context.Context) {
 
 	// New login?
 	if ww.client.Store.ID == nil {
-		qrChan, err := ww.client.GetQRChannel(ctx)
-		if err != nil {
-			ww.queueViewMessage(ErrorView, err.Error())
-			return
-		}
-		if err = ww.client.Connect(); err != nil {
-			ww.queueViewMessage(ErrorView, err.Error())
-			return
-		}
-		for evt := range qrChan {
-			if evt.Event == "code" {
-				ww.queueViewMessage(QrView, evt.Code)
-			} else {
-				fmt.Println("Login event: ", evt.Event)
-			}
-		}
+		// initially set QR view without code
+		ww.queueViewMessage(QrView, nil)
 	} else {
 		// Already logged in, connect
 		if err = ww.client.Connect(); err != nil {
@@ -317,9 +412,7 @@ func main() {
 	app.ConnectActivate(func() {
 		ww, err := newWhatsWhat(ctx, app)
 		if err != nil {
-			glib.IdleAdd(func() {
-				ww.ViewError("Error", err.Error())
-			})
+			ww.queueViewMessage(ErrorView, err)
 		}
 		ww.window.SetVisible(true)
 		go ww.consumeMessages()
