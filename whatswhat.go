@@ -1,10 +1,13 @@
-package main
+package whatswhat
 
 import (
+	"github.com/tiggilyboo/whatswhat/view"
+
 	"context"
 	"fmt"
 	"os"
 	"os/signal"
+	"sync"
 
 	_ "github.com/mattn/go-sqlite3"
 
@@ -13,21 +16,9 @@ import (
 	"go.mau.fi/whatsmeow/types/events"
 	wlog "go.mau.fi/whatsmeow/util/log"
 
-	"github.com/diamondburned/gotk4/pkg/gdk/v4"
 	"github.com/diamondburned/gotk4/pkg/gio/v2"
 	"github.com/diamondburned/gotk4/pkg/glib/v2"
 	"github.com/diamondburned/gotk4/pkg/gtk/v4"
-
-	"github.com/skip2/go-qrcode"
-)
-
-type View uint8
-
-const (
-	LoadingView View = iota
-	QrView
-	ChatView
-	ErrorView
 )
 
 func eventHandler(evt interface{}) {
@@ -37,183 +28,154 @@ func eventHandler(evt interface{}) {
 	}
 }
 
-type chatView struct {
-	*gtk.ScrolledWindow
-	parent *whatsWhat
-	view   *gtk.Box
-	login  *gtk.Button
-
-	ctx    context.Context
-	cancel context.CancelFunc
+type ViewStack struct {
+	lock    sync.Mutex
+	history []view.Message
 }
 
-type qrView struct {
-	*gtk.ScrolledWindow
-	parent      *whatsWhat
-	view        *gtk.Box
-	qrImage     *gtk.Image
-	qrChan      <-chan whatsmeow.QRChannelItem
-	description *gtk.Label
-	retry       *gtk.Button
-
-	ctx    context.Context
-	cancel context.CancelFunc
+func NewViewStack() *ViewStack {
+	return &ViewStack{
+		lock:    sync.Mutex{},
+		history: []view.Message{},
+	}
 }
 
-type ViewMessage struct {
-	View    View
-	Payload interface{}
-	Error   error
+func (s *ViewStack) Push(v view.Message) {
+	s.lock.Lock()
+	defer s.lock.Unlock()
+
+	s.history = append(s.history, v)
 }
 
-type whatsWhat struct {
+func (s *ViewStack) Len() int {
+	return len(s.history)
+}
+
+func (s *ViewStack) Pop() view.Message {
+	s.lock.Lock()
+	defer s.lock.Unlock()
+
+	l := len(s.history)
+	if l == 0 {
+		return view.Undefined
+	}
+
+	v := s.history[l-1]
+	s.history = s.history[:l-1]
+	return v
+}
+
+func (s *ViewStack) Peek() view.Message {
+	l := len(s.history)
+	if l == 0 {
+		return view.Undefined
+	}
+
+	return s.history[l-1]
+}
+
+type WhatsWhatApp struct {
 	*gtk.Application
 	window   *gtk.ApplicationWindow
 	header   *gtk.HeaderBar
 	back     *gtk.Button
 	client   *whatsmeow.Client
-	viewChan chan ViewMessage
+	viewChan chan view.UiMessage
 	ctx      context.Context
 
-	view struct {
+	ui struct {
 		*gtk.Stack
-		current View
-		chats   *chatView
-		qr      *qrView
+		history *ViewStack
+		members map[view.Message]view.UiView
 	}
 }
 
-func newChatView(ww *whatsWhat) *chatView {
-	ctx, cancel := context.WithCancel(context.Background())
-	v := chatView{
-		ctx:    ctx,
-		cancel: cancel,
-		parent: ww,
-	}
-	v.view = gtk.NewBox(gtk.OrientationVertical, 0)
-
-	v.login = gtk.NewButtonWithLabel("Login")
-	v.login.ConnectClicked(func() {
-		ww.queueViewMessage(QrView, nil)
-	})
-	v.view.Append(v.login)
-
-	viewport := gtk.NewViewport(nil, nil)
-	viewport.SetScrollToFocus(true)
-	viewport.SetChild(v.view)
-
-	v.ScrolledWindow = gtk.NewScrolledWindow()
-	v.ScrolledWindow.SetPolicy(gtk.PolicyNever, gtk.PolicyAutomatic)
-	v.ScrolledWindow.SetChild(viewport)
-	v.ScrolledWindow.SetPropagateNaturalHeight(true)
-
-	return &v
-}
-
-func newQrView(ww *whatsWhat) *qrView {
-	ctx, cancel := context.WithCancel(context.Background())
-	v := qrView{
-		ctx:    ctx,
-		cancel: cancel,
-		parent: ww,
-	}
-	v.qrImage = gtk.NewImageFromIconName("image-missing-symbolic")
-	v.qrImage.SetIconSize(gtk.IconSizeLarge)
-	v.view = gtk.NewBox(gtk.OrientationVertical, 5)
-	v.view.Append(v.qrImage)
-
-	v.description = gtk.NewLabel("Loading...")
-	v.description.SetVExpand(true)
-	v.description.SetVExpand(true)
-	v.view.Append(v.description)
-
-	v.retry = gtk.NewButtonFromIconName("update-symbolic")
-	v.retry.ConnectClicked(func() {
-		ww.queueViewMessage(QrView, nil)
-	})
-	v.view.Append(v.retry)
-
-	viewport := gtk.NewViewport(nil, nil)
-	viewport.SetScrollToFocus(true)
-	viewport.SetChild(v.view)
-
-	v.ScrolledWindow = gtk.NewScrolledWindow()
-	v.ScrolledWindow.SetPolicy(gtk.PolicyNever, gtk.PolicyAutomatic)
-	v.ScrolledWindow.SetChild(viewport)
-	v.ScrolledWindow.SetPropagateNaturalHeight(true)
-
-	return &v
-}
-
-func newWhatsWhat(ctx context.Context, app *gtk.Application) (*whatsWhat, error) {
-	ww := whatsWhat{
+func NewWhatsWhatApp(ctx context.Context, app *gtk.Application) (*WhatsWhatApp, error) {
+	ww := WhatsWhatApp{
 		Application: app,
 		ctx:         ctx,
 	}
 
-	ww.viewChan = make(chan ViewMessage, 10)
-	ww.view.Stack = gtk.NewStack()
-	ww.view.SetTransitionType(gtk.StackTransitionTypeSlideLeftRight)
+	ww.viewChan = make(chan view.UiMessage, 10)
+	ww.ui.Stack = gtk.NewStack()
+	ww.ui.history = NewViewStack()
+	ww.ui.SetTransitionType(gtk.StackTransitionTypeSlideLeftRight)
+	ww.ui.members = make(map[view.Message]view.UiView)
 
-	ww.view.qr = newQrView(&ww)
-	ww.view.chats = newChatView(&ww)
+	ww.subscribeUiView(view.QrView, view.NewQrUiView(&ww))
+	ww.subscribeUiView(view.ChatView, view.NewChatView(&ww))
 
-	ww.view.AddChild(ww.view.chats)
-	ww.view.AddChild(ww.view.qr)
+	msgView := view.NewMessageView(&ww)
+	ww.subscribeUiView(view.ErrorView, msgView)
+	ww.subscribeUiView(view.LoadingView, msgView)
 
-	ww.view.current = LoadingView
-
-	loadingBox := gtk.NewBox(gtk.OrientationVertical, 0)
-	loading := gtk.NewLabel("Loading database...")
-	loadingBox.Append(loading)
-	ww.view.SetVisibleChild(loadingBox)
+	ww.window = gtk.NewApplicationWindow(app)
+	ww.window.SetDefaultSize(800, 600)
+	ww.window.SetChild(ww.ui)
+	ww.window.SetTitle("WhatsWhat")
+	ww.window.SetTitlebar(ww.header)
 
 	ww.back = gtk.NewButtonFromIconName("go-previous-symbolic")
-	ww.back.SetVisible(false)
 	ww.back.SetTooltipText("Back")
-	ww.back.ConnectClicked(ww.ViewChats)
+	ww.back.ConnectClicked(func() {
+		ww.ui.history.Pop()
+		ww.pushUiView(ww.ui.history.Peek())
+	})
+	ww.pushUiView(view.ChatView)
+	ww.ui.history.Pop()
+	ww.back.SetVisible(false)
 
 	ww.header = gtk.NewHeaderBar()
 	ww.header.PackStart(ww.back)
 
-	ww.window = gtk.NewApplicationWindow(app)
-	ww.window.SetDefaultSize(800, 600)
-	ww.window.SetChild(ww.view)
-	ww.window.SetTitle("WhatsWhat")
-	ww.window.SetTitlebar(ww.header)
-
 	return &ww, nil
 }
 
-func (ww *whatsWhat) consumeMessages() {
+func (ww *WhatsWhatApp) GetChatClient() *whatsmeow.Client {
+	return ww.client
+}
+
+func (ww *WhatsWhatApp) subscribeUiView(ident view.Message, ui view.UiView) {
+	if _, exists := ww.ui.members[ident]; exists {
+		panic(fmt.Sprint("Already subscribed UI: ", ident))
+	}
+	ww.ui.members[ident] = ui
+	ww.ui.AddChild(ui)
+}
+
+func (ww *WhatsWhatApp) pushUiView(v view.Message) {
+	member, ok := ww.ui.members[v]
+	if !ok {
+		panic(fmt.Sprintf("Unknown UI view: %s", v))
+	}
+
+	ww.ui.SetVisibleChild(member)
+	ww.ui.history.Push(v)
+	if ww.ui.history.Len() > 1 {
+		ww.back.SetVisible(true)
+	} else {
+		ww.back.SetVisible(false)
+	}
+}
+
+func (ww *WhatsWhatApp) consumeMessages() {
 	for msg := range ww.viewChan {
 		glib.IdleAdd(func() {
 			fmt.Println("consumeMessages: ", msg)
-			switch msg.View {
-			case ErrorView:
-				ww.ViewError(&msg)
-			case QrView:
-				ww.ViewQrCode(&msg)
-			case ChatView:
-				ww.ViewChats()
+			member, ok := ww.ui.members[msg.View]
+			if !ok {
+				fmt.Println("consumeMessages: UNHANDLED", msg)
+			} else {
+				member.Update(&msg)
 			}
 		})
 	}
 }
 
-func (ww *whatsWhat) consumeQrMessages() {
+func (ww *QrUiView) consumeQrMessages() {
 	for {
 		select {
-		case <-ww.view.qr.ctx.Done():
-			if ww.view.qr.ctx.Err() != nil {
-				fmt.Println("QR context done, resetting channel")
-				// cancelled, reset context for future
-				ww.view.qr.ctx, ww.view.qr.cancel = context.WithCancel(context.Background())
-				ww.view.qr.qrChan = nil
-				return
-			}
-
-		case evt, ok := <-ww.view.qr.qrChan:
+		case evt, ok := <-ww.ui.qr.qrChan:
 			if !ok {
 				// channel closed, exit
 				fmt.Println("QR channel closed, exiting")
@@ -222,11 +184,11 @@ func (ww *whatsWhat) consumeQrMessages() {
 			fmt.Println("QR channel received: ", evt)
 
 			if evt.Error != nil {
-				ww.queueViewMessage(QrView, evt.Error)
+				ww.QueueMessage(view.QrView, evt.Error)
 				break
 			}
 			if evt.Event == "code" {
-				ww.queueViewMessage(QrView, evt.Code)
+				ww.QueueMessage(view.QrView, evt.Code)
 			} else {
 				fmt.Println("Login event: ", evt.Event)
 			}
@@ -234,127 +196,41 @@ func (ww *whatsWhat) consumeQrMessages() {
 	}
 }
 
-func (ww *whatsWhat) ViewChats() {
-	fmt.Println("ViewChats: Invoked")
-
-	ww.window.SetTitle("WhatsWhat - Chat")
-	ww.view.SetVisibleChild(ww.view.chats)
-	ww.back.SetVisible(false)
-	ww.view.current = ChatView
-
-	if ww.client == nil || !ww.client.IsLoggedIn() {
-		ww.view.chats.login.SetVisible(true)
-		return
-	}
-
-	// Client is logged in!
-	fmt.Println("Logged in")
-	ww.view.chats.login.SetVisible(false)
-}
-
-func (ww *whatsWhat) ViewError(msg *ViewMessage) {
-	fmt.Println("ViewError: ", msg)
-
-	messageBox := gtk.NewBox(gtk.OrientationVertical, 0)
-
-	var text *gtk.Label
-	if msg.Error != nil {
-		text = gtk.NewLabel(msg.Error.Error())
-	} else {
-		text = gtk.NewLabel(fmt.Sprint(msg.Payload))
-	}
-	messageBox.Append(text)
-
-	ww.window.SetTitle("WhatsWhat - Message")
-	ww.view.SetVisibleChild(messageBox)
-	ww.back.SetVisible(true)
-	ww.view.current = ErrorView
-}
-
-func (ww *whatsWhat) ViewQrCode(msg *ViewMessage) {
+func (ww *WhatsWhatApp) ViewQrCode(msg *view.ViewMessage) {
 	fmt.Println("ViewQrCode: ", msg)
 
-	ww.view.current = QrView
-	if ww.view.qr.qrImage != nil {
-		ww.view.qr.view.Remove(ww.view.qr.qrImage)
+	// Remove old QR image
+	if ww.ui.qr.qrImage != nil {
+		ww.ui.qr.view.Remove(ww.ui.qr.qrImage)
 	}
 
-	if ww.view.qr.qrChan == nil {
+	// No code, reset and make new QR chan
+	if msg.Error != nil && msg.Payload == nil {
+		if ww.ui.qr.reset != nil {
+			ww.ui.qr.reset()
+			ww.ui.qr.ctx, ww.ui.qr.reset = context.WithCancel(context.Background())
+		}
+
 		var err error
-		ww.view.qr.qrChan, err = ww.client.GetQRChannel(ww.view.qr.ctx)
+		ww.ui.qr.qrChan, err = ww.client.GetQRChannel(ww.ui.qr.ctx)
 		if err != nil {
-			ww.queueViewMessage(ErrorView, err)
+			ww.QueueMessage(view.ErrorView, err)
 			return
 		}
 
 		if err = ww.client.Connect(); err != nil {
-			ww.queueViewMessage(ErrorView, err)
+			ww.QueueMessage(view.ErrorView, err)
 			return
 		}
 
+		// Consume any new QR messages in another routine
 		go ww.consumeQrMessages()
 	}
 
-	var code *string
-	if msg.Error != nil {
-		ww.view.qr.description.SetLabel(msg.Error.Error())
-		ww.view.qr.retry.SetVisible(true)
-		return
-	} else if msg.Payload == nil {
-		code = nil
-	} else {
-		codeStr := msg.Payload.(string)
-		code = &codeStr
-		ww.view.qr.description.SetLabel("Scan the WhatsApp QR code on your phone to login")
-		ww.view.qr.retry.SetVisible(false)
-	}
-
-	ww.window.SetTitle("WhatsApp - Login")
-	ww.back.SetVisible(true)
-
-	var imageUi *gtk.Image
-	if code == nil {
-		fmt.Println("Empty code, load icon to show loading...")
-
-		imageUi = gtk.NewImageFromIconName("image-missing-symbolic")
-	} else {
-		fmt.Println("Encoding qrcode bytes...")
-		var qrCodeBytes []byte
-		qrCodeBytes, err := qrcode.Encode(*code, qrcode.Medium, 512)
-		if err != nil {
-			ww.queueViewMessage(ErrorView, err.Error())
-			return
-		}
-
-		fmt.Println("Making texture from QR code PNG bytes")
-		qrCodeGlibBytes := glib.NewBytes(qrCodeBytes)
-		texture, err := gdk.NewTextureFromBytes(qrCodeGlibBytes)
-		if err != nil {
-			ww.queueViewMessage(ErrorView, err.Error())
-			return
-		}
-		fmt.Println("Making image from paintable texture")
-		imageUi = gtk.NewImageFromPaintable(texture)
-	}
-	imageUi.SetVExpand(true)
-	imageUi.SetHExpand(true)
-
-	fmt.Println("Setting qrImage in UI")
-	ww.view.qr.qrImage = imageUi
-	ww.view.qr.view.Prepend(ww.view.qr.qrImage)
-	ww.view.qr.view.SetVisible(true)
-	ww.view.qr.SetVisible(true)
-	ww.view.SetVisibleChild(ww.view.qr)
-	ww.view.qr.qrImage.SetVisible(true)
+	ww.ui.ShowUiView(view.QrView)
 }
 
-func (ww *whatsWhat) Shutdown() {
-	if ww.client != nil {
-		ww.client.Disconnect()
-	}
-}
-
-func (ww *whatsWhat) queueViewMessage(view View, payload interface{}) {
+func (ww *WhatsWhatApp) QueueMessage(view view.View, payload interface{}) {
 	var msgErr error
 	switch payload.(type) {
 	case error:
@@ -363,24 +239,24 @@ func (ww *whatsWhat) queueViewMessage(view View, payload interface{}) {
 	default:
 		msgErr = nil
 	}
-	ww.viewChan <- ViewMessage{
+	ww.viewChan <- view.UiMessage{
 		View:    view,
 		Payload: payload,
 		Error:   msgErr,
 	}
 }
 
-func (ww *whatsWhat) InitializeChat(ctx context.Context) {
+func (ww *WhatsWhatApp) InitializeChat(ctx context.Context) {
 	dbLog := wlog.Stdout("Database", "DEBUG", true)
 	container, err := sqlstore.New("sqlite3", "file:whatswhat.db?_foreign_keys=on", dbLog)
 	if err != nil {
-		ww.queueViewMessage(ErrorView, err)
+		ww.QueueMessage(view.ErrorView, err)
 		return
 	}
 
 	deviceStore, err := container.GetFirstDevice()
 	if err != nil {
-		ww.queueViewMessage(ErrorView, err)
+		ww.QueueMessage(view.ErrorView, err)
 		return
 	}
 
@@ -391,15 +267,15 @@ func (ww *whatsWhat) InitializeChat(ctx context.Context) {
 	// New login?
 	if ww.client.Store.ID == nil {
 		// initially set QR view without code
-		ww.queueViewMessage(QrView, nil)
+		ww.QueueMessage(view.QrView, nil)
 	} else {
 		// Already logged in, connect
 		if err = ww.client.Connect(); err != nil {
-			ww.queueViewMessage(ErrorView, err.Error())
+			ww.QueueMessage(view.ErrorView, err.Error())
 			return
 		}
 
-		ww.queueViewMessage(ChatView, nil)
+		ww.QueueMessage(view.ChatView, nil)
 	}
 }
 
@@ -410,9 +286,9 @@ func main() {
 
 	app := gtk.NewApplication("com.github.tiggilyboo.whatswhat", gio.ApplicationFlagsNone)
 	app.ConnectActivate(func() {
-		ww, err := newWhatsWhat(ctx, app)
+		ww, err := NewWhatsWhatApp(ctx, app)
 		if err != nil {
-			ww.queueViewMessage(ErrorView, err)
+			ww.QueueMessage(view.ErrorView, err)
 		}
 		ww.window.SetVisible(true)
 		go ww.consumeMessages()
