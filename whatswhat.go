@@ -1,6 +1,8 @@
-package whatswhat
+package main
 
 import (
+	"time"
+
 	"github.com/tiggilyboo/whatswhat/view"
 
 	"context"
@@ -20,13 +22,6 @@ import (
 	"github.com/diamondburned/gotk4/pkg/glib/v2"
 	"github.com/diamondburned/gotk4/pkg/gtk/v4"
 )
-
-func eventHandler(evt interface{}) {
-	switch v := evt.(type) {
-	case *events.Message:
-		fmt.Println("Received a message!", v.Message.GetConversation())
-	}
-}
 
 type ViewStack struct {
 	lock    sync.Mutex
@@ -87,6 +82,7 @@ type WhatsWhatApp struct {
 		*gtk.Stack
 		history *ViewStack
 		members map[view.Message]view.UiView
+		current view.UiView
 	}
 }
 
@@ -98,6 +94,8 @@ func NewWhatsWhatApp(ctx context.Context, app *gtk.Application) (*WhatsWhatApp, 
 
 	ww.viewChan = make(chan view.UiMessage, 10)
 	ww.ui.Stack = gtk.NewStack()
+	ww.ui.Stack.SetName("WhatsWhatStack")
+
 	ww.ui.history = NewViewStack()
 	ww.ui.SetTransitionType(gtk.StackTransitionTypeSlideLeftRight)
 	ww.ui.members = make(map[view.Message]view.UiView)
@@ -109,24 +107,27 @@ func NewWhatsWhatApp(ctx context.Context, app *gtk.Application) (*WhatsWhatApp, 
 	ww.subscribeUiView(view.ErrorView, msgView)
 	ww.subscribeUiView(view.LoadingView, msgView)
 
+	ww.back = gtk.NewButtonFromIconName("go-previous-symbolic")
+	ww.back.SetTooltipText("Back")
+	ww.back.ConnectClicked(func() {
+		last := ww.ui.history.Pop()
+		fmt.Println("Clicked back from: ", last)
+
+		current := ww.ui.history.Peek()
+		ww.pushUiView(current)
+	})
+
+	ww.header = gtk.NewHeaderBar()
+	ww.header.PackStart(ww.back)
+
 	ww.window = gtk.NewApplicationWindow(app)
 	ww.window.SetDefaultSize(800, 600)
 	ww.window.SetChild(ww.ui)
 	ww.window.SetTitle("WhatsWhat")
 	ww.window.SetTitlebar(ww.header)
 
-	ww.back = gtk.NewButtonFromIconName("go-previous-symbolic")
-	ww.back.SetTooltipText("Back")
-	ww.back.ConnectClicked(func() {
-		ww.ui.history.Pop()
-		ww.pushUiView(ww.ui.history.Peek())
-	})
 	ww.pushUiView(view.ChatView)
-	ww.ui.history.Pop()
 	ww.back.SetVisible(false)
-
-	ww.header = gtk.NewHeaderBar()
-	ww.header.PackStart(ww.back)
 
 	return &ww, nil
 }
@@ -144,17 +145,40 @@ func (ww *WhatsWhatApp) subscribeUiView(ident view.Message, ui view.UiView) {
 }
 
 func (ww *WhatsWhatApp) pushUiView(v view.Message) {
+	fmt.Println("pushUiView: ", v)
+
 	member, ok := ww.ui.members[v]
 	if !ok {
 		panic(fmt.Sprintf("Unknown UI view: %s", v))
 	}
 
+	// Wait until current member is busy
+	current := ww.ui.current
+	if current != nil {
+		waitTimeout, _ := context.WithTimeout(context.Background(), 1*time.Second)
+
+	ready:
+		for {
+			select {
+			case <-current.Done():
+				fmt.Print("Current UI view done")
+				break ready
+			case <-waitTimeout.Done():
+				fmt.Print("Closing current UI view from timeout")
+				current.Close()
+				break ready
+			}
+		}
+	}
+
 	ww.ui.SetVisibleChild(member)
+	ww.ui.current = member
+
 	ww.ui.history.Push(v)
-	if ww.ui.history.Len() > 1 {
-		ww.back.SetVisible(true)
-	} else {
+	if ww.ui.history.Len() <= 1 {
 		ww.back.SetVisible(false)
+	} else {
+		ww.back.SetVisible(true)
 	}
 }
 
@@ -162,75 +186,21 @@ func (ww *WhatsWhatApp) consumeMessages() {
 	for msg := range ww.viewChan {
 		glib.IdleAdd(func() {
 			fmt.Println("consumeMessages: ", msg)
-			member, ok := ww.ui.members[msg.View]
+			member, ok := ww.ui.members[msg.Identifier]
 			if !ok {
 				fmt.Println("consumeMessages: UNHANDLED", msg)
 			} else {
 				member.Update(&msg)
+
+				if ww.ui.history.Peek() != msg.Identifier {
+					ww.pushUiView(msg.Identifier)
+				}
 			}
 		})
 	}
 }
 
-func (ww *QrUiView) consumeQrMessages() {
-	for {
-		select {
-		case evt, ok := <-ww.ui.qr.qrChan:
-			if !ok {
-				// channel closed, exit
-				fmt.Println("QR channel closed, exiting")
-				return
-			}
-			fmt.Println("QR channel received: ", evt)
-
-			if evt.Error != nil {
-				ww.QueueMessage(view.QrView, evt.Error)
-				break
-			}
-			if evt.Event == "code" {
-				ww.QueueMessage(view.QrView, evt.Code)
-			} else {
-				fmt.Println("Login event: ", evt.Event)
-			}
-		}
-	}
-}
-
-func (ww *WhatsWhatApp) ViewQrCode(msg *view.ViewMessage) {
-	fmt.Println("ViewQrCode: ", msg)
-
-	// Remove old QR image
-	if ww.ui.qr.qrImage != nil {
-		ww.ui.qr.view.Remove(ww.ui.qr.qrImage)
-	}
-
-	// No code, reset and make new QR chan
-	if msg.Error != nil && msg.Payload == nil {
-		if ww.ui.qr.reset != nil {
-			ww.ui.qr.reset()
-			ww.ui.qr.ctx, ww.ui.qr.reset = context.WithCancel(context.Background())
-		}
-
-		var err error
-		ww.ui.qr.qrChan, err = ww.client.GetQRChannel(ww.ui.qr.ctx)
-		if err != nil {
-			ww.QueueMessage(view.ErrorView, err)
-			return
-		}
-
-		if err = ww.client.Connect(); err != nil {
-			ww.QueueMessage(view.ErrorView, err)
-			return
-		}
-
-		// Consume any new QR messages in another routine
-		go ww.consumeQrMessages()
-	}
-
-	ww.ui.ShowUiView(view.QrView)
-}
-
-func (ww *WhatsWhatApp) QueueMessage(view view.View, payload interface{}) {
+func (ww *WhatsWhatApp) QueueMessage(id view.Message, payload interface{}) {
 	var msgErr error
 	switch payload.(type) {
 	case error:
@@ -240,9 +210,9 @@ func (ww *WhatsWhatApp) QueueMessage(view view.View, payload interface{}) {
 		msgErr = nil
 	}
 	ww.viewChan <- view.UiMessage{
-		View:    view,
-		Payload: payload,
-		Error:   msgErr,
+		Identifier: id,
+		Payload:    payload,
+		Error:      msgErr,
 	}
 }
 
@@ -262,13 +232,13 @@ func (ww *WhatsWhatApp) InitializeChat(ctx context.Context) {
 
 	clientLog := wlog.Stdout("Client", "DEBUG", true)
 	ww.client = whatsmeow.NewClient(deviceStore, clientLog)
-	ww.client.AddEventHandler(eventHandler)
 
 	// New login?
 	if ww.client.Store.ID == nil {
 		// initially set QR view without code
 		ww.QueueMessage(view.QrView, nil)
 	} else {
+
 		// Already logged in, connect
 		if err = ww.client.Connect(); err != nil {
 			ww.QueueMessage(view.ErrorView, err.Error())
@@ -279,7 +249,7 @@ func (ww *WhatsWhatApp) InitializeChat(ctx context.Context) {
 	}
 }
 
-func main() {
+func Run() {
 	// Initialize UI
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer cancel()
@@ -303,4 +273,8 @@ func main() {
 		cancel()
 		os.Exit(code)
 	}
+}
+
+func main() {
+	Run()
 }
