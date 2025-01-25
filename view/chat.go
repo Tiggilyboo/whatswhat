@@ -5,15 +5,66 @@ import (
 	"fmt"
 
 	"github.com/diamondburned/gotk4/pkg/gtk/v4"
-	"go.mau.fi/whatsmeow"
+	history "go.mau.fi/whatsmeow/proto/waHistorySync"
+	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
 )
 
+type chatItemRow struct {
+	*gtk.ListBoxRow
+	ui      *gtk.Box
+	chat    *history.Conversation
+	title   *gtk.Label
+	profile *gtk.Image
+}
+
+func NewChatRow(chat *history.Conversation) (*chatItemRow, error) {
+	chatItemRow := chatItemRow{
+		ListBoxRow: gtk.NewListBoxRow(),
+		chat:       chat,
+	}
+	ui := gtk.NewBox(gtk.OrientationHorizontal, 5)
+	chatItemRow.ListBoxRow.SetChild(ui)
+
+	profile := gtk.NewImageFromIconName("avatar-default-symbolic")
+	profile.SetVExpand(true)
+	ui.Append(profile)
+	chatItemRow.profile = profile
+
+	title := gtk.NewLabel(chat.GetDisplayName())
+	title.SetVExpand(true)
+	title.SetVAlign(gtk.AlignFill)
+	ui.Append(title)
+
+	chatItemRow.title = title
+	chatItemRow.ui = ui
+
+	err := chatItemRow.Update(chat)
+	if err != nil {
+		return nil, err
+	}
+
+	return &chatItemRow, nil
+}
+
+func (ci *chatItemRow) Update(chat *history.Conversation) error {
+	ci.title.SetLabel(chat.GetDisplayName())
+	ci.profile.ConnectShow(ci.UpdateProfileImage)
+
+	return nil
+}
+
+func (ci *chatItemRow) UpdateProfileImage() {
+
+}
+
 type ChatUiView struct {
 	*gtk.ScrolledWindow
-	parent UiParent
-	view   *gtk.Box
-	login  *gtk.Button
+	parent   UiParent
+	view     *gtk.Box
+	login    *gtk.Button
+	chats    *gtk.ListBox
+	contacts map[types.JID]types.ContactInfo
 
 	ctx       context.Context
 	cancel    context.CancelFunc
@@ -38,6 +89,12 @@ func NewChatView(parent UiParent) *ChatUiView {
 	})
 	v.view.Append(v.login)
 
+	v.chats = gtk.NewListBox()
+	v.chats.SetHExpand(true)
+	v.chats.SetVExpand(true)
+	v.chats.SetVisible(false)
+	v.view.Append(v.chats)
+
 	viewport := gtk.NewViewport(nil, nil)
 	viewport.SetScrollToFocus(true)
 	viewport.SetChild(v.view)
@@ -48,6 +105,37 @@ func NewChatView(parent UiParent) *ChatUiView {
 	v.ScrolledWindow.SetPropagateNaturalHeight(true)
 
 	return &v
+}
+
+func (ch *ChatUiView) chatEventHandler(evt interface{}) {
+	switch v := evt.(type) {
+	case *events.Connected:
+		ch.login.SetVisible(false)
+		ch.chats.SetVisible(true)
+		client := ch.parent.GetChatClient()
+		contacts, err := client.Store.Contacts.GetAllContacts()
+		if err != nil {
+			ch.parent.QueueMessage(ErrorView, err)
+			return
+		}
+		ch.contacts = contacts
+
+	case *events.Disconnected:
+		ch.Close()
+		ch.login.SetVisible(true)
+		ch.chats.SetVisible(false)
+
+	case *events.Message:
+		fmt.Println(fmt.Println(v.Info.Chat.User, v.Message))
+
+	case *events.HistorySync:
+		ch.HistorySync(v)
+
+	case *events.LoggedOut:
+		ch.Close()
+		ch.login.SetVisible(true)
+		ch.chats.SetVisible(false)
+	}
 }
 
 func (ch *ChatUiView) Done() <-chan struct{} {
@@ -72,38 +160,36 @@ func (ch *ChatUiView) Title() string {
 func (ch *ChatUiView) Update(msg *UiMessage) error {
 	fmt.Println("ViewChats: Invoked")
 
+	if msg.Error != nil {
+		return msg.Error
+	}
+
 	client := ch.parent.GetChatClient()
-	if client == nil || !client.IsLoggedIn() {
+	if client == nil || !client.IsConnected() {
 		ch.login.SetVisible(true)
+		ch.chats.SetVisible(false)
 		return nil
 	}
 
-	// Client is logged in!
-	fmt.Println("Logged in")
-	ch.login.SetVisible(false)
-
-	contacts, err := client.Store.Contacts.GetAllContacts()
-	for jid, contact := range contacts {
-
-	}
 	// Bind the event handler
 	ch.evtHandle = client.AddEventHandler(ch.chatEventHandler)
 
 	return nil
 }
 
-func (ch *ChatUiView) bindEventHandler() {
-}
+func (ch *ChatUiView) HistorySync(evt *events.HistorySync) error {
+	fmt.Println("Got history sync!")
 
-func (ch *ChatUiView) chatEventHandler(evt interface{}) {
-	switch v := evt.(type) {
-	case *events.Message:
-		fmt.Println(fmt.Println(v.Info.Chat.User, v.Message))
+	for _, chat := range evt.Data.Conversations {
+		chatItemRow, err := NewChatRow(chat)
+		if err != nil {
+			return err
+		}
 
-	case *events.Disconnected:
-		ch.Update(&UiMessage{
-			Identifier: ErrorView,
-			Payload:    "Disconnected",
-		})
+		ch.chats.Append(chatItemRow)
 	}
+	ch.login.SetVisible(false)
+	ch.chats.SetVisible(true)
+
+	return nil
 }

@@ -14,6 +14,7 @@ const (
 	ErrorView
 	QrView
 	ChatView
+	ProfileView
 )
 
 type UiMessage struct {

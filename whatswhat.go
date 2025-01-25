@@ -74,6 +74,7 @@ type WhatsWhatApp struct {
 	window   *gtk.ApplicationWindow
 	header   *gtk.HeaderBar
 	back     *gtk.Button
+	profile  *gtk.Button
 	client   *whatsmeow.Client
 	viewChan chan view.UiMessage
 	ctx      context.Context
@@ -102,6 +103,7 @@ func NewWhatsWhatApp(ctx context.Context, app *gtk.Application) (*WhatsWhatApp, 
 
 	ww.subscribeUiView(view.QrView, view.NewQrUiView(&ww))
 	ww.subscribeUiView(view.ChatView, view.NewChatView(&ww))
+	ww.subscribeUiView(view.ProfileView, view.NewProfileUiView(&ww))
 
 	msgView := view.NewMessageView(&ww)
 	ww.subscribeUiView(view.ErrorView, msgView)
@@ -117,8 +119,17 @@ func NewWhatsWhatApp(ctx context.Context, app *gtk.Application) (*WhatsWhatApp, 
 		ww.pushUiView(current)
 	})
 
+	ww.profile = gtk.NewButtonFromIconName("avatar-default-symbolic")
+	ww.profile.SetTooltipText("Account")
+	ww.profile.SetVisible(false)
+	ww.profile.ConnectClicked(func() {
+		fmt.Println("Clicked profile")
+		ww.pushUiView(view.ProfileView)
+	})
+
 	ww.header = gtk.NewHeaderBar()
 	ww.header.PackStart(ww.back)
+	ww.header.PackEnd(ww.profile)
 
 	ww.window = gtk.NewApplicationWindow(app)
 	ww.window.SetDefaultSize(800, 600)
@@ -216,6 +227,23 @@ func (ww *WhatsWhatApp) QueueMessage(id view.Message, payload interface{}) {
 	}
 }
 
+func (ww *WhatsWhatApp) handleConnectedState(connected bool) {
+	if ww.client.IsLoggedIn() {
+		ww.profile.SetVisible(true)
+	} else {
+		ww.profile.SetVisible(false)
+	}
+}
+
+func (ww *WhatsWhatApp) handleCommonEvents(evt interface{}) {
+	switch evt.(type) {
+	case *events.Connected:
+		ww.handleConnectedState(true)
+	case *events.Disconnected:
+		ww.handleConnectedState(false)
+	}
+}
+
 func (ww *WhatsWhatApp) InitializeChat(ctx context.Context) {
 	dbLog := wlog.Stdout("Database", "DEBUG", true)
 	container, err := sqlstore.New("sqlite3", "file:whatswhat.db?_foreign_keys=on", dbLog)
@@ -232,11 +260,13 @@ func (ww *WhatsWhatApp) InitializeChat(ctx context.Context) {
 
 	clientLog := wlog.Stdout("Client", "DEBUG", true)
 	ww.client = whatsmeow.NewClient(deviceStore, clientLog)
+	ww.client.AddEventHandler(ww.handleCommonEvents)
 
 	// New login?
 	if ww.client.Store.ID == nil {
 		// initially set QR view without code
 		ww.QueueMessage(view.QrView, nil)
+		ww.profile.SetVisible(false)
 	} else {
 
 		// Already logged in, connect
@@ -244,7 +274,7 @@ func (ww *WhatsWhatApp) InitializeChat(ctx context.Context) {
 			ww.QueueMessage(view.ErrorView, err.Error())
 			return
 		}
-
+		ww.profile.SetVisible(true)
 		ww.QueueMessage(view.ChatView, nil)
 	}
 }
