@@ -160,7 +160,5 @@ func (pv *ProfileUiView) updateProfileImage(id *types.JID) error {
 	pv.profile = gtk.NewImageFromPaintable(pictureTexture)
 	pv.Box.Prepend(pv.profile)
 
-	<-pv.ctx.Done()
-
 	return nil
 }

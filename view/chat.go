@@ -5,57 +5,59 @@ import (
 	"fmt"
 
 	"github.com/diamondburned/gotk4/pkg/gtk/v4"
-	history "go.mau.fi/whatsmeow/proto/waHistorySync"
+	"github.com/tiggilyboo/whatswhat/db"
+	"github.com/tiggilyboo/whatswhat/view/models"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
 )
 
 type chatItemRow struct {
 	*gtk.ListBoxRow
-	ui      *gtk.Box
-	chat    *history.Conversation
-	title   *gtk.Label
-	profile *gtk.Image
+	parent UiParent
+	chat   *models.ConversationInfo
+	ui     *gtk.Box
+	title  *gtk.Label
+	status *gtk.Image
 }
 
-func NewChatRow(chat *history.Conversation) (*chatItemRow, error) {
+func NewChatRow(parent UiParent, chat *db.Conversation) (*chatItemRow, error) {
 	chatItemRow := chatItemRow{
 		ListBoxRow: gtk.NewListBoxRow(),
-		chat:       chat,
+		parent:     parent,
 	}
 	ui := gtk.NewBox(gtk.OrientationHorizontal, 5)
 	chatItemRow.ListBoxRow.SetChild(ui)
 
-	profile := gtk.NewImageFromIconName("avatar-default-symbolic")
-	profile.SetVExpand(true)
-	ui.Append(profile)
-	chatItemRow.profile = profile
+	chatInfo, err := models.GetConversationInfo(parent.GetChatClient(), chat.ChatJID)
+	if err != nil {
+		return nil, err
+	}
 
-	title := gtk.NewLabel(chat.GetDisplayName())
+	title := gtk.NewLabel(chatInfo.Name)
 	title.SetVExpand(true)
 	title.SetVAlign(gtk.AlignFill)
 	ui.Append(title)
 
+	status := gtk.NewImageFromIconName("media-record-symbolic")
+	status.SetVExpand(true)
+	status.SetHAlign(gtk.AlignEnd)
+	ui.Append(status)
+
 	chatItemRow.title = title
 	chatItemRow.ui = ui
 
-	err := chatItemRow.Update(chat)
-	if err != nil {
+	if err := chatItemRow.Update(chatInfo); err != nil {
 		return nil, err
 	}
 
 	return &chatItemRow, nil
 }
 
-func (ci *chatItemRow) Update(chat *history.Conversation) error {
-	ci.title.SetLabel(chat.GetDisplayName())
-	ci.profile.ConnectShow(ci.UpdateProfileImage)
+func (ci *chatItemRow) Update(model *models.ConversationInfo) error {
+	ci.title.SetLabel(model.Name)
+	ci.chat = model
 
 	return nil
-}
-
-func (ci *chatItemRow) UpdateProfileImage() {
-
 }
 
 type ChatUiView struct {
@@ -65,6 +67,8 @@ type ChatUiView struct {
 	login    *gtk.Button
 	chats    *gtk.ListBox
 	contacts map[types.JID]types.ContactInfo
+	synced   bool
+	syncing  bool
 
 	ctx       context.Context
 	cancel    context.CancelFunc
@@ -108,8 +112,10 @@ func NewChatView(parent UiParent) *ChatUiView {
 }
 
 func (ch *ChatUiView) chatEventHandler(evt interface{}) {
-	switch v := evt.(type) {
+
+	switch evt.(type) {
 	case *events.Connected:
+		fmt.Println("chatEventHandler: Connected")
 		ch.login.SetVisible(false)
 		ch.chats.SetVisible(true)
 		client := ch.parent.GetChatClient()
@@ -118,20 +124,17 @@ func (ch *ChatUiView) chatEventHandler(evt interface{}) {
 			ch.parent.QueueMessage(ErrorView, err)
 			return
 		}
+		fmt.Println("loaded ", len(contacts), " contacts")
 		ch.contacts = contacts
 
 	case *events.Disconnected:
+		fmt.Println("chatEventHandler: Disconnected")
 		ch.Close()
 		ch.login.SetVisible(true)
 		ch.chats.SetVisible(false)
 
-	case *events.Message:
-		fmt.Println(fmt.Println(v.Info.Chat.User, v.Message))
-
-	case *events.HistorySync:
-		ch.HistorySync(v)
-
 	case *events.LoggedOut:
+		fmt.Println("chatEventHandler: Logged out")
 		ch.Close()
 		ch.login.SetVisible(true)
 		ch.chats.SetVisible(false)
@@ -174,22 +177,8 @@ func (ch *ChatUiView) Update(msg *UiMessage) error {
 	// Bind the event handler
 	ch.evtHandle = client.AddEventHandler(ch.chatEventHandler)
 
-	return nil
-}
-
-func (ch *ChatUiView) HistorySync(evt *events.HistorySync) error {
-	fmt.Println("Got history sync!")
-
-	for _, chat := range evt.Data.Conversations {
-		chatItemRow, err := NewChatRow(chat)
-		if err != nil {
-			return err
-		}
-
-		ch.chats.Append(chatItemRow)
-	}
-	ch.login.SetVisible(false)
-	ch.chats.SetVisible(true)
+	ch.cancel()
+	fmt.Println("ChatUiView: Done")
 
 	return nil
 }

@@ -1,8 +1,11 @@
 package main
 
 import (
+	"database/sql"
 	"time"
 
+	"github.com/rs/zerolog"
+	"github.com/tiggilyboo/whatswhat/db"
 	"github.com/tiggilyboo/whatswhat/view"
 
 	"context"
@@ -13,6 +16,8 @@ import (
 
 	_ "github.com/mattn/go-sqlite3"
 
+	wwdb "github.com/tiggilyboo/whatswhat/db"
+	"go.mau.fi/util/dbutil"
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/store/sqlstore"
 	"go.mau.fi/whatsmeow/types/events"
@@ -76,6 +81,7 @@ type WhatsWhatApp struct {
 	back     *gtk.Button
 	profile  *gtk.Button
 	client   *whatsmeow.Client
+	DB       *db.Database
 	viewChan chan view.UiMessage
 	ctx      context.Context
 
@@ -137,7 +143,7 @@ func NewWhatsWhatApp(ctx context.Context, app *gtk.Application) (*WhatsWhatApp, 
 	ww.window.SetTitle("WhatsWhat")
 	ww.window.SetTitlebar(ww.header)
 
-	ww.pushUiView(view.ChatView)
+	ww.QueueMessage(view.ChatView, nil)
 	ww.back.SetVisible(false)
 
 	return &ww, nil
@@ -163,10 +169,11 @@ func (ww *WhatsWhatApp) pushUiView(v view.Message) {
 		panic(fmt.Sprintf("Unknown UI view: %s", v))
 	}
 
-	// Wait until current member is busy
+	// Wait while current member is busy
 	current := ww.ui.current
 	if current != nil {
-		waitTimeout, _ := context.WithTimeout(context.Background(), 1*time.Second)
+		waitTimeout, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
 
 	ready:
 		for {
@@ -184,6 +191,11 @@ func (ww *WhatsWhatApp) pushUiView(v view.Message) {
 
 	ww.ui.SetVisibleChild(member)
 	ww.ui.current = member
+
+	// Loading is special, we pop it as well from history before pushing the next view
+	if ww.ui.history.Peek() == view.LoadingView {
+		ww.ui.history.Pop()
+	}
 
 	ww.ui.history.Push(v)
 	if ww.ui.history.Len() <= 1 {
@@ -244,21 +256,45 @@ func (ww *WhatsWhatApp) handleCommonEvents(evt interface{}) {
 	}
 }
 
-func (ww *WhatsWhatApp) InitializeChat(ctx context.Context) {
-	dbLog := wlog.Stdout("Database", "DEBUG", true)
-	container, err := sqlstore.New("sqlite3", "file:whatswhat.db?_foreign_keys=on", dbLog)
+func (ww *WhatsWhatApp) Initialize(ctx context.Context) error {
+	sqlDb, err := sql.Open("sqlite3", "file:whatswhat.db?_foreign_keys=on")
 	if err != nil {
-		ww.QueueMessage(view.ErrorView, err)
-		return
+		return err
+	}
+
+	dbLog := wlog.Stdout("Database", "DEBUG", true)
+	container := sqlstore.NewWithDB(sqlDb, "sqlite3", dbLog)
+	if err != nil {
+		return err
+	}
+	if err := container.Upgrade(); err != nil {
+		return err
 	}
 
 	deviceStore, err := container.GetFirstDevice()
 	if err != nil {
-		ww.QueueMessage(view.ErrorView, err)
-		return
+		return err
+	}
+	clientLog := wlog.Stdout("Client", "DEBUG", true)
+
+	deviceJID := deviceStore.ID
+	wrappedDb, err := dbutil.NewWithDB(sqlDb, "sqlite3")
+	if err != nil {
+		return err
 	}
 
-	clientLog := wlog.Stdout("Client", "DEBUG", true)
+	chatDb := wwdb.New(*deviceJID, wrappedDb, zerolog.New(zerolog.NewConsoleWriter()))
+
+	upgradeCtx, timeout := context.WithTimeout(context.Background(), 10*time.Second)
+	defer timeout()
+	chatDb.Upgrade(upgradeCtx)
+	<-upgradeCtx.Done()
+	if err := upgradeCtx.Err(); err != nil {
+		return err
+	}
+
+	ww.DB = chatDb
+
 	ww.client = whatsmeow.NewClient(deviceStore, clientLog)
 	ww.client.AddEventHandler(ww.handleCommonEvents)
 
@@ -271,12 +307,13 @@ func (ww *WhatsWhatApp) InitializeChat(ctx context.Context) {
 
 		// Already logged in, connect
 		if err = ww.client.Connect(); err != nil {
-			ww.QueueMessage(view.ErrorView, err.Error())
-			return
+			return err
 		}
 		ww.profile.SetVisible(true)
 		ww.QueueMessage(view.ChatView, nil)
 	}
+
+	return nil
 }
 
 func Run() {
@@ -289,11 +326,18 @@ func Run() {
 		ww, err := NewWhatsWhatApp(ctx, app)
 		if err != nil {
 			ww.QueueMessage(view.ErrorView, err)
-		}
-		ww.window.SetVisible(true)
-		go ww.consumeMessages()
+		} else {
+			go ww.consumeMessages()
 
-		go ww.InitializeChat(ctx)
+			if err == nil {
+				err = ww.Initialize(ctx)
+				if err != nil {
+					ww.QueueMessage(view.ErrorView, err)
+				}
+			}
+		}
+
+		ww.window.SetVisible(true)
 	})
 	go func() {
 		<-ctx.Done()
