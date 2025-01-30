@@ -84,9 +84,11 @@ func (qr *QrUiView) RefreshQrCode() {
 }
 
 func (qr *QrUiView) Update(msg *UiMessage) error {
-
-	// Are we already authenticated?
 	client := qr.parent.GetChatClient()
+	if client == nil {
+		return fmt.Errorf("WhatsApp client not initialized")
+	}
+
 	if client.IsLoggedIn() {
 		qr.description.SetLabel("Already logged in.")
 		qr.refresh.SetVisible(false)

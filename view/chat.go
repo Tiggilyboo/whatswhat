@@ -173,12 +173,34 @@ func (ch *ChatUiView) Update(msg *UiMessage) error {
 		ch.chats.SetVisible(false)
 		return nil
 	}
+	if ch.evtHandle != 0 {
+		ch.Close()
+	}
 
 	// Bind the event handler
 	ch.evtHandle = client.AddEventHandler(ch.chatEventHandler)
 
-	ch.cancel()
-	fmt.Println("ChatUiView: Done")
+	fmt.Println("Upgrading chat database")
+	chatDb := ch.parent.GetChatDB()
+	go chatDb.Upgrade(ch.ctx)
 
+	fmt.Println("Getting conversations...")
+	conversations, err := chatDb.Conversation.GetRecent(ch.ctx, *client.Store.ID, 50)
+	if err != nil {
+		return err
+	}
+
+	fmt.Printf("Got %s conversations\n", len(conversations))
+	for _, convo := range conversations {
+		chatRow, err := NewChatRow(ch.parent, convo)
+		if err != nil {
+			return err
+		}
+
+		fmt.Printf("Appending %s\n", chatRow.chat.Name)
+		ch.chats.Append(chatRow)
+	}
+
+	fmt.Println("ChatUiView: Done")
 	return nil
 }

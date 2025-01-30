@@ -81,7 +81,7 @@ type WhatsWhatApp struct {
 	back     *gtk.Button
 	profile  *gtk.Button
 	client   *whatsmeow.Client
-	DB       *db.Database
+	chatDB   *db.Database
 	viewChan chan view.UiMessage
 	ctx      context.Context
 
@@ -153,6 +153,10 @@ func (ww *WhatsWhatApp) GetChatClient() *whatsmeow.Client {
 	return ww.client
 }
 
+func (ww *WhatsWhatApp) GetChatDB() *db.Database {
+	return ww.chatDB
+}
+
 func (ww *WhatsWhatApp) subscribeUiView(ident view.Message, ui view.UiView) {
 	if _, exists := ww.ui.members[ident]; exists {
 		panic(fmt.Sprint("Already subscribed UI: ", ident))
@@ -172,7 +176,7 @@ func (ww *WhatsWhatApp) pushUiView(v view.Message) {
 	// Wait while current member is busy
 	current := ww.ui.current
 	if current != nil {
-		waitTimeout, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		waitTimeout, cancel := context.WithDeadline(context.Background(), time.Now().Add(3*time.Second))
 		defer cancel()
 
 	ready:
@@ -213,7 +217,13 @@ func (ww *WhatsWhatApp) consumeMessages() {
 			if !ok {
 				fmt.Println("consumeMessages: UNHANDLED", msg)
 			} else {
-				member.Update(&msg)
+				if err := member.Update(&msg); err != nil {
+					if msg.Identifier == view.ErrorView {
+						panic(msg)
+					}
+					ww.QueueMessage(view.ErrorView, fmt.Errorf("Unable to update %s view: %s", msg.Identifier, err))
+					return
+				}
 
 				if ww.ui.history.Peek() != msg.Identifier {
 					ww.pushUiView(msg.Identifier)
@@ -267,6 +277,7 @@ func (ww *WhatsWhatApp) Initialize(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	fmt.Println("Upgrading whatsapp database")
 	if err := container.Upgrade(); err != nil {
 		return err
 	}
@@ -276,25 +287,16 @@ func (ww *WhatsWhatApp) Initialize(ctx context.Context) error {
 		return err
 	}
 	clientLog := wlog.Stdout("Client", "DEBUG", true)
-
-	deviceJID := deviceStore.ID
 	wrappedDb, err := dbutil.NewWithDB(sqlDb, "sqlite3")
 	if err != nil {
 		return err
 	}
 
-	chatDb := wwdb.New(*deviceJID, wrappedDb, zerolog.New(zerolog.NewConsoleWriter()))
+	chatDbLog := zerolog.New(os.Stdout)
+	chatDb := wwdb.New(wrappedDb, chatDbLog)
+	ww.chatDB = chatDb
 
-	upgradeCtx, timeout := context.WithTimeout(context.Background(), 10*time.Second)
-	defer timeout()
-	chatDb.Upgrade(upgradeCtx)
-	<-upgradeCtx.Done()
-	if err := upgradeCtx.Err(); err != nil {
-		return err
-	}
-
-	ww.DB = chatDb
-
+	fmt.Println("Creating new whatsapp client")
 	ww.client = whatsmeow.NewClient(deviceStore, clientLog)
 	ww.client.AddEventHandler(ww.handleCommonEvents)
 

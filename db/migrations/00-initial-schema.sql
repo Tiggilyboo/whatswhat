@@ -1,4 +1,4 @@
--- v0: Initial schema
+-- v1: Initial schema
 
 CREATE TABLE whatsapp_history_sync_conversation (
     device_jid                   TEXT    NOT NULL,

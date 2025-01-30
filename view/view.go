@@ -2,6 +2,7 @@ package view
 
 import (
 	"github.com/diamondburned/gotk4/pkg/gtk/v4"
+	"github.com/tiggilyboo/whatswhat/db"
 	"go.mau.fi/whatsmeow"
 )
 
@@ -34,4 +35,5 @@ type UiView interface {
 type UiParent interface {
 	QueueMessage(v Message, payload interface{})
 	GetChatClient() *whatsmeow.Client
+	GetChatDB() *db.Database
 }

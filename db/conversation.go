@@ -12,7 +12,6 @@ import (
 )
 
 type ConversationQuery struct {
-	DeviceJID types.JID
 	*dbutil.QueryHelper[*Conversation]
 }
 
@@ -129,30 +128,30 @@ func (c *Conversation) sqlVariables() []any {
 	}
 }
 
-func (cq *ConversationQuery) Put(ctx context.Context, conv *Conversation) error {
-	conv.DeviceJID = cq.DeviceJID
+func (cq *ConversationQuery) Put(ctx context.Context, deviceJID types.JID, conv *Conversation) error {
+	conv.DeviceJID = deviceJID
 	return cq.Exec(ctx, upsertHistorySyncConversationQuery, conv.sqlVariables()...)
 }
 
-func (cq *ConversationQuery) GetRecent(ctx context.Context, limit int) ([]*Conversation, error) {
+func (cq *ConversationQuery) GetRecent(ctx context.Context, deviceJID types.JID, limit int) ([]*Conversation, error) {
 	limitPtr := &limit
 	// Negative limit on SQLite means unlimited, but Postgres prefers a NULL limit.
 	if limit < 0 && cq.GetDB().Dialect == dbutil.Postgres {
 		limitPtr = nil
 	}
-	return cq.QueryMany(ctx, getRecentConversations, cq.DeviceJID, limitPtr)
+	return cq.QueryMany(ctx, getRecentConversations, deviceJID, limitPtr)
 }
 
 func (cq *ConversationQuery) Get(ctx context.Context, chatJID types.JID) (*Conversation, error) {
 	return cq.QueryOne(ctx, getConversationByJID, chatJID)
 }
 
-func (cq *ConversationQuery) DeleteAll(ctx context.Context) error {
-	return cq.Exec(ctx, deleteAllConversationsQuery, cq.DeviceJID)
+func (cq *ConversationQuery) DeleteAll(ctx context.Context, deviceJID types.JID) error {
+	return cq.Exec(ctx, deleteAllConversationsQuery, deviceJID)
 }
 
-func (cq *ConversationQuery) Delete(ctx context.Context, chatJID types.JID) error {
-	return cq.Exec(ctx, deleteConversationQuery, cq.DeviceJID, chatJID)
+func (cq *ConversationQuery) Delete(ctx context.Context, deviceJID types.JID, chatJID types.JID) error {
+	return cq.Exec(ctx, deleteConversationQuery, deviceJID, chatJID)
 }
 
 func (c *Conversation) Scan(row dbutil.Scannable) (*Conversation, error) {

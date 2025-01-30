@@ -14,7 +14,6 @@ import (
 )
 
 type MessageQuery struct {
-	DeviceJID types.JID
 	*dbutil.Database
 }
 
@@ -57,14 +56,14 @@ func (t *HistorySyncMessageTuple) GetMassInsertValues() [4]any {
 	return [4]any{t.Info.Sender.ToNonAD(), t.Info.ID, t.Info.Timestamp.Unix(), t.Message}
 }
 
-var batchInsertHistorySyncMessage = dbutil.NewMassInsertBuilder[*HistorySyncMessageTuple, [4]any](
+var batchInsertHistorySyncMessage = dbutil.NewMassInsertBuilder[*HistorySyncMessageTuple, [3]any](
 	insertHistorySyncMessageQuery, "($1, $2, $%d, $%d, $%d, $%d, $3)",
 )
 
-func (mq *MessageQuery) Put(ctx context.Context, chatJID types.JID, messages []*HistorySyncMessageTuple) error {
+func (mq *MessageQuery) Put(ctx context.Context, deviceJID types.JID, chatJID types.JID, messages []*HistorySyncMessageTuple) error {
 	return mq.DoTxn(ctx, nil, func(ctx context.Context) error {
 		for _, chunk := range exslices.Chunk(messages, 50) {
-			query, params := batchInsertHistorySyncMessage.Build([4]any{mq.DeviceJID, chatJID, time.Now().Unix()}, chunk)
+			query, params := batchInsertHistorySyncMessage.Build([3]any{deviceJID, chatJID, time.Now().Unix()}, chunk)
 			_, err := mq.Exec(ctx, query, params...)
 			if err != nil {
 				return err
@@ -90,9 +89,9 @@ func scanWebMessageInfo(rows dbutil.Scannable) (*waWeb.WebMessageInfo, error) {
 
 var webMessageInfoConverter = dbutil.ConvertRowFn[*waWeb.WebMessageInfo](scanWebMessageInfo)
 
-func (mq *MessageQuery) GetBetween(ctx context.Context, chatJID types.JID, startTime, endTime *time.Time, limit int) ([]*waWeb.WebMessageInfo, error) {
+func (mq *MessageQuery) GetBetween(ctx context.Context, deviceJID types.JID, chatJID types.JID, startTime, endTime *time.Time, limit int) ([]*waWeb.WebMessageInfo, error) {
 	whereClauses := ""
-	args := []any{mq.DeviceJID, chatJID}
+	args := []any{deviceJID, chatJID}
 	argNum := 4
 	if startTime != nil {
 		whereClauses += fmt.Sprintf(" AND timestamp >= $%d", argNum)
@@ -115,22 +114,22 @@ func (mq *MessageQuery) GetBetween(ctx context.Context, chatJID types.JID, start
 		AsList()
 }
 
-func (mq *MessageQuery) DeleteBetween(ctx context.Context, chatJID types.JID, before, after uint64) error {
-	_, err := mq.Exec(ctx, deleteHistorySyncMessagesBetweenQuery, mq.DeviceJID, chatJID, before, after)
+func (mq *MessageQuery) DeleteBetween(ctx context.Context, deviceJID types.JID, chatJID types.JID, before, after uint64) error {
+	_, err := mq.Exec(ctx, deleteHistorySyncMessagesBetweenQuery, deviceJID, chatJID, before, after)
 	return err
 }
 
-func (mq *MessageQuery) DeleteAll(ctx context.Context) error {
-	_, err := mq.Exec(ctx, deleteAllHistorySyncMessagesQuery, mq.DeviceJID)
+func (mq *MessageQuery) DeleteAll(ctx context.Context, deviceJID types.JID) error {
+	_, err := mq.Exec(ctx, deleteAllHistorySyncMessagesQuery, deviceJID)
 	return err
 }
 
-func (mq *MessageQuery) DeleteAllInChat(ctx context.Context, chatJID types.JID) error {
-	_, err := mq.Exec(ctx, deleteHistorySyncMessagesForPortalQuery, mq.DeviceJID, chatJID)
+func (mq *MessageQuery) DeleteAllInChat(ctx context.Context, deviceJID types.JID, chatJID types.JID) error {
+	_, err := mq.Exec(ctx, deleteHistorySyncMessagesForPortalQuery, deviceJID, chatJID)
 	return err
 }
 
-func (mq *MessageQuery) ConversationHasMessages(ctx context.Context, chatJID types.JID) (exists bool, err error) {
-	err = mq.QueryRow(ctx, conversationHasHistorySyncMessagesQuery, mq.DeviceJID, chatJID).Scan(&exists)
+func (mq *MessageQuery) ConversationHasMessages(ctx context.Context, deviceJID types.JID, chatJID types.JID) (exists bool, err error) {
+	err = mq.QueryRow(ctx, conversationHasHistorySyncMessagesQuery, deviceJID, chatJID).Scan(&exists)
 	return
 }
