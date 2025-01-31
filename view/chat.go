@@ -3,6 +3,7 @@ package view
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/diamondburned/gotk4/pkg/gtk/v4"
 	"github.com/tiggilyboo/whatswhat/db"
@@ -176,6 +177,8 @@ func (ch *ChatUiView) Update(msg *UiMessage) error {
 	if ch.evtHandle != 0 {
 		ch.Close()
 	}
+	ch.ctx, ch.cancel = context.WithDeadline(context.Background(), time.Now().Add(2*time.Second))
+	defer ch.cancel()
 
 	// Bind the event handler
 	ch.evtHandle = client.AddEventHandler(ch.chatEventHandler)

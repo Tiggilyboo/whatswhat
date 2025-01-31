@@ -129,8 +129,7 @@ func NewWhatsWhatApp(ctx context.Context, app *gtk.Application) (*WhatsWhatApp, 
 	ww.profile.SetTooltipText("Account")
 	ww.profile.SetVisible(false)
 	ww.profile.ConnectClicked(func() {
-		fmt.Println("Clicked profile")
-		ww.pushUiView(view.ProfileView)
+		ww.QueueMessage(view.ProfileView, nil)
 	})
 
 	ww.header = gtk.NewHeaderBar()
@@ -217,11 +216,10 @@ func (ww *WhatsWhatApp) consumeMessages() {
 			if !ok {
 				fmt.Println("consumeMessages: UNHANDLED", msg)
 			} else {
-				if err := member.Update(&msg); err != nil {
-					if msg.Identifier == view.ErrorView {
-						panic(msg)
-					}
-					ww.QueueMessage(view.ErrorView, fmt.Errorf("Unable to update %s view: %s", msg.Identifier, err))
+				fmt.Println("Updating view")
+				err := member.Update(&msg)
+				if err != nil {
+					ww.QueueMessage(view.ErrorView, err)
 					return
 				}
 
@@ -295,6 +293,11 @@ func (ww *WhatsWhatApp) Initialize(ctx context.Context) error {
 	chatDbLog := zerolog.New(os.Stdout)
 	chatDb := wwdb.New(wrappedDb, chatDbLog)
 	ww.chatDB = chatDb
+
+	fmt.Println("Upgrading chat database")
+	if err := chatDb.Upgrade(ctx); err != nil {
+		return err
+	}
 
 	fmt.Println("Creating new whatsapp client")
 	ww.client = whatsmeow.NewClient(deviceStore, clientLog)

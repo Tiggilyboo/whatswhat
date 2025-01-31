@@ -11,6 +11,7 @@ import (
 	"github.com/diamondburned/gotk4/pkg/gdk/v4"
 	"github.com/diamondburned/gotk4/pkg/glib/v2"
 	"github.com/diamondburned/gotk4/pkg/gtk/v4"
+	"github.com/diamondburned/gotk4/pkg/pango"
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/types"
 )
@@ -29,6 +30,8 @@ type ProfileUiView struct {
 
 func NewProfileUiView(parent UiParent) *ProfileUiView {
 	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
 	v := ProfileUiView{
 		ctx:    ctx,
 		cancel: cancel,
@@ -36,9 +39,14 @@ func NewProfileUiView(parent UiParent) *ProfileUiView {
 	}
 	v.Box = gtk.NewBox(gtk.OrientationVertical, 0)
 	v.name = gtk.NewLabel("Loading")
+	fontDesc := v.name.PangoContext().FontDescription()
+	fontDesc.SetSize(18 * pango.SCALE)
+	v.name.PangoContext().SetFontDescription(fontDesc)
+
 	v.status = gtk.NewLabel("...")
 
 	v.noProfile = gtk.NewImageFromIconName("avatar-default-symbolic")
+	v.noProfile.SetIconSize(gtk.IconSizeLarge)
 
 	v.profile = gtk.NewImage()
 	v.profile.SetVisible(false)
@@ -61,14 +69,14 @@ func (pv *ProfileUiView) Update(msg *UiMessage) error {
 	if msg.Error != nil {
 		return msg.Error
 	}
+	pv.ctx, pv.cancel = context.WithCancel(context.Background())
+	defer pv.cancel()
 
 	client := pv.parent.GetChatClient()
 
-	var id *types.JID
-
-	// View current user
+	var id types.JID
 	if msg.Payload == nil {
-		id = client.Store.ID
+		id = client.Store.ID.ToNonAD()
 	} else {
 		switch msg.Payload.(type) {
 		case types.JID:
@@ -76,7 +84,7 @@ func (pv *ProfileUiView) Update(msg *UiMessage) error {
 			if !ok {
 				return errors.New("Error casting current user id")
 			}
-			id = &payloadId
+			id = payloadId
 		default:
 			return errors.New("Unexpected UI message payload: ")
 		}
@@ -90,40 +98,53 @@ func (pv *ProfileUiView) Done() <-chan struct{} {
 }
 
 func (pv *ProfileUiView) Close() {
-	if pv.ctx.Done() != nil {
+	if pv.cancel != nil {
 		pv.cancel()
 	}
 }
 
-func (pv *ProfileUiView) updateFromUserId(id *types.JID) error {
+func (pv *ProfileUiView) updateFromUserId(id types.JID) error {
 	client := pv.parent.GetChatClient()
-	fmt.Println("ProfileUiView.Update: GetUserInfo: ", *id)
-	users, err := client.GetUserInfo([]types.JID{*id})
+	fmt.Println("ProfileUiView.Update: GetUserInfo: ", id)
+	users, err := client.GetUserInfo([]types.JID{id})
 	if err != nil {
 		return err
 	}
 
-	userInfo, ok := users[*id]
+	userInfo, ok := users[id]
 	if !ok {
-		return errors.New(fmt.Sprint("Unable to find user profile for: ", id.User))
+		return fmt.Errorf("Unable to find user profile for: %s\n", id)
 	}
 
-	fmt.Println("ProfileUiView.Update: GetContact: ", *id)
-	contact, err := client.Store.Contacts.GetContact(*id)
+	fmt.Println("ProfileUiView.Update: GetContact: ", id)
+	contact, err := client.Store.Contacts.GetContact(id)
 	if err != nil {
 		return err
 	}
 	fmt.Println("ProfileUiView.Update: Contact: ", contact.FullName)
 
 	pv.name.SetLabel(contact.FullName)
-	pv.status.SetLabel(userInfo.Status)
 	pv.noProfile.SetVisible(true)
 	pv.profile.SetVisible(false)
+
+	if len(userInfo.Status) > 0 {
+		pv.status.SetLabel(userInfo.Status)
+	} else {
+		onWhatsAppQuery, err := client.IsOnWhatsApp([]string{id.User})
+		if err != nil {
+			return err
+		}
+		if len(onWhatsAppQuery) > 0 && onWhatsAppQuery[0].IsIn {
+			pv.status.SetLabel("On WhatsApp")
+		} else {
+			pv.status.SetLabel("Not on WhatsApp")
+		}
+	}
 
 	return pv.updateProfileImage(id)
 }
 
-func (pv *ProfileUiView) updateProfileImage(id *types.JID) error {
+func (pv *ProfileUiView) updateProfileImage(id types.JID) error {
 	fmt.Println("ProfileUiView.updateProfileImage: id: ", id)
 	client := pv.parent.GetChatClient()
 
@@ -132,8 +153,15 @@ func (pv *ProfileUiView) updateProfileImage(id *types.JID) error {
 		IsCommunity: false,
 	}
 	fmt.Println("ProfileUiView.updateProfileImage: GetProfilePictureImage: ", pictureParams)
-	pictureInfo, err := client.GetProfilePictureInfo(*id, &pictureParams)
+	pictureInfo, err := client.GetProfilePictureInfo(id, &pictureParams)
 	if err != nil {
+		if errors.Is(err, whatsmeow.ErrProfilePictureNotSet) {
+			fmt.Println("ProfileUiView.updateProfileImage: User has no profile image")
+			pv.profile.Clear()
+			pv.profile.SetVisible(false)
+			pv.noProfile.SetVisible(true)
+			return nil
+		}
 		return err
 	}
 
