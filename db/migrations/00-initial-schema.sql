@@ -1,4 +1,4 @@
--- v0 -> v6: Initial schema
+-- v0 -> v1: Initial schema
 
 CREATE TABLE whatsapp_history_sync_conversation (
     device_jid                   TEXT    NOT NULL,
@@ -13,6 +13,7 @@ CREATE TABLE whatsapp_history_sync_conversation (
     ephemeral_setting_timestamp  BIGINT,
     marked_as_unread             BOOLEAN,
     unread_count                 INTEGER,
+    name                         TEXT    NOT NULL,
 
     PRIMARY KEY (device_jid, chat_jid)
 );

@@ -13,7 +13,7 @@ type Database struct {
 }
 
 func New(db *dbutil.Database, log zerolog.Logger) *Database {
-	db = db.Child("whatsmeow_version", migrations.Table, dbutil.ZeroLogger(log))
+	db = db.Child("whatswhat_version", migrations.Table, dbutil.ZeroLogger(log))
 
 	return &Database{
 		Database: db,

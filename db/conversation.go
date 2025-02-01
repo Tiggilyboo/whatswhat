@@ -27,6 +27,7 @@ type Conversation struct {
 	EphemeralSettingTimestamp *int64
 	MarkedAsUnread            *bool
 	UnreadCount               *uint32
+	Name                      string
 }
 
 func parseHistoryTime(ts *uint64) time.Time {
@@ -41,6 +42,16 @@ func NewConversation(deviceJID types.JID, chatJID types.JID, conv *waHistorySync
 	if conv.Pinned != nil {
 		pinned = ptr.Ptr(*conv.Pinned > 0)
 	}
+	var convoName string
+	if conv.Name != nil {
+		convoName = *conv.Name
+	} else if conv.DisplayName != nil {
+		convoName = *conv.DisplayName
+	} else if conv.ID != nil {
+		convoName = *conv.ID
+	} else {
+		convoName = "Group"
+	}
 	return &Conversation{
 		DeviceJID:                 deviceJID,
 		ChatJID:                   chatJID,
@@ -53,6 +64,7 @@ func NewConversation(deviceJID types.JID, chatJID types.JID, conv *waHistorySync
 		EphemeralSettingTimestamp: conv.EphemeralSettingTimestamp,
 		MarkedAsUnread:            conv.MarkedAsUnread,
 		UnreadCount:               conv.UnreadCount,
+		Name:                      convoName,
 	}
 }
 
@@ -60,7 +72,7 @@ const (
 	upsertHistorySyncConversationQuery = `INSERT INTO whatsapp_history_sync_conversation (
 			device_jid, chat_jid, last_message_timestamp, archived, pinned, mute_end_time,
 			end_of_history_transfer_type, ephemeral_expiration, ephemeral_setting_timestamp, marked_as_unread,
-			unread_count
+			unread_count, name
 		)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
 		ON CONFLICT (device_jid, chat_jid)
@@ -78,15 +90,16 @@ const (
 			ephemeral_expiration=COALESCE(excluded.ephemeral_expiration, whatsapp_history_sync_conversation.ephemeral_expiration),
 			ephemeral_setting_timestamp=COALESCE(excluded.ephemeral_setting_timestamp, whatsapp_history_sync_conversation.ephemeral_setting_timestamp),
 			marked_as_unread=COALESCE(excluded.marked_as_unread, whatsapp_history_sync_conversation.marked_as_unread),
-			unread_count=COALESCE(excluded.unread_count, whatsapp_history_sync_conversation.unread_count)
+			unread_count=COALESCE(excluded.unread_count, whatsapp_history_sync_conversation.unread_count),
+			name=COALESCE(excluded.name, whatsapp_history_sync_conversation.name)
 	`
 	getRecentConversations = `
 		SELECT
 			device_jid, chat_jid, last_message_timestamp, archived, pinned, mute_end_time,
 			end_of_history_transfer_type, ephemeral_expiration, ephemeral_setting_timestamp, marked_as_unread,
-			unread_count
+			unread_count, name
 		FROM whatsapp_history_sync_conversation
-		WHERE device_jid=$1
+		WHERE device_jid=$1 AND archived=$2
 		ORDER BY last_message_timestamp DESC
 		LIMIT $3
 	`
@@ -94,7 +107,7 @@ const (
 		SELECT
 			device_jid, chat_jid, last_message_timestamp, archived, pinned, mute_end_time,
 			end_of_history_transfer_type, ephemeral_expiration, ephemeral_setting_timestamp, marked_as_unread,
-			unread_count
+			unread_count, name
 		FROM whatsapp_history_sync_conversation
 		WHERE device_jid=$1 AND chat_jid=$2
 	`
@@ -125,6 +138,7 @@ func (c *Conversation) sqlVariables() []any {
 		c.EphemeralSettingTimestamp,
 		c.MarkedAsUnread,
 		c.UnreadCount,
+		c.Name,
 	}
 }
 
@@ -133,13 +147,13 @@ func (cq *ConversationQuery) Put(ctx context.Context, deviceJID types.JID, conv 
 	return cq.Exec(ctx, upsertHistorySyncConversationQuery, conv.sqlVariables()...)
 }
 
-func (cq *ConversationQuery) GetRecent(ctx context.Context, deviceJID types.JID, limit int) ([]*Conversation, error) {
+func (cq *ConversationQuery) GetRecent(ctx context.Context, deviceJID types.JID, limit int, archived bool) ([]*Conversation, error) {
 	limitPtr := &limit
 	// Negative limit on SQLite means unlimited, but Postgres prefers a NULL limit.
 	if limit < 0 && cq.GetDB().Dialect == dbutil.Postgres {
 		limitPtr = nil
 	}
-	return cq.QueryMany(ctx, getRecentConversations, deviceJID, limitPtr)
+	return cq.QueryMany(ctx, getRecentConversations, deviceJID, archived, limitPtr)
 }
 
 func (cq *ConversationQuery) Get(ctx context.Context, chatJID types.JID) (*Conversation, error) {
@@ -168,6 +182,7 @@ func (c *Conversation) Scan(row dbutil.Scannable) (*Conversation, error) {
 		&c.EphemeralSettingTimestamp,
 		&c.MarkedAsUnread,
 		&c.UnreadCount,
+		&c.Name,
 	)
 	if err != nil {
 		return nil, err

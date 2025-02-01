@@ -4,6 +4,7 @@ import (
 	"github.com/diamondburned/gotk4/pkg/gtk/v4"
 	"github.com/tiggilyboo/whatswhat/db"
 	"go.mau.fi/whatsmeow"
+	"go.mau.fi/whatsmeow/types"
 )
 
 type Message uint8
@@ -36,4 +37,5 @@ type UiParent interface {
 	QueueMessage(v Message, payload interface{})
 	GetChatClient() *whatsmeow.Client
 	GetChatDB() *db.Database
+	GetContacts() (map[types.JID]types.ContactInfo, error)
 }

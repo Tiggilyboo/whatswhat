@@ -2,7 +2,9 @@ package models
 
 import (
 	"fmt"
+	"time"
 
+	"github.com/tiggilyboo/whatswhat/db"
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/types"
 )
@@ -13,87 +15,89 @@ type ConversationMemberInfo struct {
 }
 
 type ConversationInfo struct {
-	ChatJID  types.JID
-	Name     string
-	Members  []ConversationMemberInfo
-	ReadOnly bool
+	ChatJID              types.JID
+	Name                 string
+	Members              []ConversationMemberInfo
+	Unread               bool
+	LastMessageTimestamp time.Time
 }
 
-func GetConversationInfo(client *whatsmeow.Client, chatJID types.JID) (*ConversationInfo, error) {
-	switch chatJID.Server {
+func GetConversationInfo(client *whatsmeow.Client, convo *db.Conversation, contacts map[types.JID]types.ContactInfo, detailed bool) (*ConversationInfo, error) {
+	chatName := convo.Name
+	unread := false
+	if convo.MarkedAsUnread != nil {
+		unread = *convo.MarkedAsUnread
+	}
+	var members []ConversationMemberInfo
+
+	switch convo.ChatJID.Server {
 	case types.DefaultUserServer:
-		contacts, err := client.Store.Contacts.GetAllContacts()
-		if err != nil {
-			return nil, err
+		var members []ConversationMemberInfo
+		if detailed {
+			members = make([]ConversationMemberInfo, 2)
+			otherContact, ok := contacts[convo.ChatJID.ToNonAD()]
+			if !ok {
+				return nil, fmt.Errorf("Unable to find other contact in chat: %s", convo.ChatJID)
+			}
+			members[0] = ConversationMemberInfo{
+				ContactInfo: otherContact,
+				JID:         convo.ChatJID,
+			}
+			currentContact, ok := contacts[client.Store.ID.ToNonAD()]
+			if !ok {
+				return nil, fmt.Errorf("Unable to find current user contact in chat: %s", convo.ChatJID)
+			}
+			members[1] = ConversationMemberInfo{
+				ContactInfo: currentContact,
+				JID:         *client.Store.ID,
+			}
 		}
-
-		members := make([]ConversationMemberInfo, 2)
-		otherContact, ok := contacts[chatJID]
-		if !ok {
-			return nil, fmt.Errorf("Unable to find other contact in chat: %s", chatJID)
-		}
-		members[0] = ConversationMemberInfo{
-			ContactInfo: otherContact,
-			JID:         chatJID,
-		}
-		currentContact, ok := contacts[*client.Store.ID]
-		if !ok {
-			return nil, fmt.Errorf("Unable to find current user contact in chat: %s", chatJID)
-		}
-		members[1] = ConversationMemberInfo{
-			ContactInfo: currentContact,
-			JID:         *client.Store.ID,
-		}
-		chatName := otherContact.FullName
-
-		return &ConversationInfo{
-			ChatJID:  chatJID,
-			Name:     chatName,
-			Members:  members,
-			ReadOnly: false,
-		}, nil
 
 	case types.NewsletterServer:
-		info, err := client.GetNewsletterInfo(chatJID)
-		if err != nil {
-			return nil, err
-		}
-		members := make([]ConversationMemberInfo, 0)
-
-		return &ConversationInfo{
-			ChatJID:  info.ID,
-			Name:     info.ThreadMeta.Name.Text,
-			Members:  members,
-			ReadOnly: true,
-		}, nil
-
-	case types.GroupServer:
-		info, err := client.GetGroupInfo(chatJID)
-		if err != nil {
-			return nil, err
-		}
-		members := make([]ConversationMemberInfo, len(info.Participants))
-		groupParticipants := info.Participants
-		for _, p := range groupParticipants {
-			memberContact, err := client.Store.Contacts.GetContact(p.JID)
+		if detailed {
+			info, err := client.GetNewsletterInfo(convo.ChatJID)
 			if err != nil {
 				return nil, err
 			}
+			chatName = info.ThreadMeta.Name.Text
+		}
+		members = make([]ConversationMemberInfo, 0)
 
-			members = append(members, ConversationMemberInfo{
-				ContactInfo: memberContact,
-				JID:         p.JID,
-			})
+	case types.GroupServer:
+
+		if detailed {
+			info, err := client.GetGroupInfo(convo.ChatJID)
+			if err != nil {
+				return nil, err
+			}
+			members := make([]ConversationMemberInfo, len(info.Participants))
+			groupParticipants := info.Participants
+			for _, p := range groupParticipants {
+				memberContact, ok := contacts[p.JID.ToNonAD()]
+				if !ok {
+					memberContact, err = client.Store.Contacts.GetContact(p.JID)
+					if err != nil {
+						fmt.Printf("Unable to find group '%s' participant %s\n", info.Name, p.DisplayName)
+						continue
+					}
+				}
+
+				members = append(members, ConversationMemberInfo{
+					ContactInfo: memberContact,
+					JID:         p.JID,
+				})
+			}
 		}
 
-		return &ConversationInfo{
-			ChatJID:  info.JID,
-			Name:     info.Name,
-			Members:  members,
-			ReadOnly: false,
-		}, nil
-
 	default:
-		return nil, fmt.Errorf("unsupported server %s", chatJID.Server)
+		return nil, fmt.Errorf("unsupported server %s", convo.ChatJID.Server)
 	}
+
+	return &ConversationInfo{
+		ChatJID:              convo.ChatJID,
+		Name:                 chatName,
+		Members:              members,
+		Unread:               unread,
+		LastMessageTimestamp: convo.LastMessageTimestamp,
+	}, nil
 }

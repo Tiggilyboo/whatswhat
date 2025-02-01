@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/diamondburned/gotk4/pkg/gtk/v4"
+	"github.com/diamondburned/gotk4/pkg/pango"
 	"github.com/tiggilyboo/whatswhat/db"
 	"github.com/tiggilyboo/whatswhat/view/models"
 	"go.mau.fi/whatsmeow/types"
@@ -29,17 +30,30 @@ func NewChatRow(parent UiParent, chat *db.Conversation) (*chatItemRow, error) {
 	ui := gtk.NewBox(gtk.OrientationHorizontal, 5)
 	chatItemRow.ListBoxRow.SetChild(ui)
 
-	chatInfo, err := models.GetConversationInfo(parent.GetChatClient(), chat.ChatJID)
+	contacts, err := parent.GetContacts()
+	if err != nil {
+		return nil, err
+	}
+
+	chatInfo, err := models.GetConversationInfo(parent.GetChatClient(), chat, contacts, false)
 	if err != nil {
 		return nil, err
 	}
 
 	title := gtk.NewLabel(chatInfo.Name)
+	titleFont := title.PangoContext().FontDescription()
+	titleFont.SetSize(14 * pango.SCALE)
+	title.PangoContext().SetFontDescription(titleFont)
 	title.SetVExpand(true)
 	title.SetVAlign(gtk.AlignFill)
 	ui.Append(title)
 
-	status := gtk.NewImageFromIconName("media-record-symbolic")
+	var status *gtk.Image
+	if chatInfo.Unread {
+		status = gtk.NewImageFromIconName("media-record-symbolic")
+	} else {
+		status = gtk.NewImage()
+	}
 	status.SetVExpand(true)
 	status.SetHAlign(gtk.AlignEnd)
 	ui.Append(status)
@@ -119,14 +133,6 @@ func (ch *ChatUiView) chatEventHandler(evt interface{}) {
 		fmt.Println("chatEventHandler: Connected")
 		ch.login.SetVisible(false)
 		ch.chats.SetVisible(true)
-		client := ch.parent.GetChatClient()
-		contacts, err := client.Store.Contacts.GetAllContacts()
-		if err != nil {
-			ch.parent.QueueMessage(ErrorView, err)
-			return
-		}
-		fmt.Println("loaded ", len(contacts), " contacts")
-		ch.contacts = contacts
 
 	case *events.Disconnected:
 		fmt.Println("chatEventHandler: Disconnected")
@@ -183,12 +189,10 @@ func (ch *ChatUiView) Update(msg *UiMessage) error {
 	// Bind the event handler
 	ch.evtHandle = client.AddEventHandler(ch.chatEventHandler)
 
-	fmt.Println("Upgrading chat database")
+	fmt.Println("Getting conversations from chat DB...")
 	chatDb := ch.parent.GetChatDB()
-	go chatDb.Upgrade(ch.ctx)
-
-	fmt.Println("Getting conversations...")
-	conversations, err := chatDb.Conversation.GetRecent(ch.ctx, *client.Store.ID, 50)
+	archived := false
+	conversations, err := chatDb.Conversation.GetRecent(ch.ctx, *client.Store.ID, 30, archived)
 	if err != nil {
 		return err
 	}

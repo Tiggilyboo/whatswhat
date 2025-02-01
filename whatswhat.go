@@ -20,8 +20,10 @@ import (
 	"go.mau.fi/util/dbutil"
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/store/sqlstore"
+	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
 	wlog "go.mau.fi/whatsmeow/util/log"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/diamondburned/gotk4/pkg/gio/v2"
 	"github.com/diamondburned/gotk4/pkg/glib/v2"
@@ -82,6 +84,7 @@ type WhatsWhatApp struct {
 	profile  *gtk.Button
 	client   *whatsmeow.Client
 	chatDB   *db.Database
+	contacts map[types.JID]types.ContactInfo
 	viewChan chan view.UiMessage
 	ctx      context.Context
 
@@ -154,6 +157,19 @@ func (ww *WhatsWhatApp) GetChatClient() *whatsmeow.Client {
 
 func (ww *WhatsWhatApp) GetChatDB() *db.Database {
 	return ww.chatDB
+}
+
+func (ww *WhatsWhatApp) GetContacts() (map[types.JID]types.ContactInfo, error) {
+	if ww.contacts != nil {
+		return ww.contacts, nil
+	}
+
+	contacts, err := ww.client.Store.Contacts.GetAllContacts()
+	if err != nil {
+		return nil, err
+	}
+
+	return contacts, nil
 }
 
 func (ww *WhatsWhatApp) subscribeUiView(ident view.Message, ui view.UiView) {
@@ -249,18 +265,99 @@ func (ww *WhatsWhatApp) QueueMessage(id view.Message, payload interface{}) {
 
 func (ww *WhatsWhatApp) handleConnectedState(connected bool) {
 	if ww.client.IsLoggedIn() {
+		contacts, err := ww.client.Store.Contacts.GetAllContacts()
+		if err != nil {
+			ww.QueueMessage(view.ErrorView, err)
+			return
+		}
+		fmt.Println("loaded ", len(contacts), " contacts")
+		ww.contacts = contacts
+
 		ww.profile.SetVisible(true)
 	} else {
 		ww.profile.SetVisible(false)
 	}
 }
 
+func (ww *WhatsWhatApp) handleHistorySync(evt *events.HistorySync) {
+	if ww.chatDB == nil {
+		ww.QueueMessage(view.ErrorView, fmt.Errorf("Chat database not initialized, cannot load chat history"))
+		return
+	}
+	if ww.client == nil || !ww.client.IsLoggedIn() {
+		ww.QueueMessage(view.ErrorView, fmt.Errorf("Unable to handle history sync, logged in!"))
+		return
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	failedToSaveConversations := 0
+	failedToSaveMessages := 0
+	addedMessages := 0
+
+	deviceID := ww.client.Store.ID
+	for _, convo := range evt.Data.Conversations {
+		chatJID, err := types.ParseJID(convo.GetID())
+		if err != nil {
+			ww.QueueMessage(view.ErrorView, err)
+			return
+		}
+
+		messages := make([]*wwdb.HistorySyncMessageTuple, 0, len(convo.GetMessages()))
+		for _, rawMsg := range convo.GetMessages() {
+			msgEvt, err := ww.client.ParseWebMessage(chatJID, rawMsg.GetMessage())
+			if err != nil {
+				fmt.Println("Dropping historical message due to parse error in ", chatJID)
+				continue
+			}
+
+			marshaled, err := proto.Marshal(rawMsg)
+			if err != nil {
+				fmt.Println("Dropping historical message due to marshal error in ", chatJID)
+				continue
+			}
+
+			tuple := &wwdb.HistorySyncMessageTuple{
+				Info:    &msgEvt.Info,
+				Message: marshaled,
+			}
+			messages = append(messages, tuple)
+		}
+
+		if len(messages) > 0 {
+			dbConvo := wwdb.NewConversation(*deviceID, chatJID, convo)
+			if err := ww.chatDB.Conversation.Put(ctx, *deviceID, dbConvo); err != nil {
+				failedToSaveConversations += 1
+				fmt.Printf("Unable to save conversation metadata: %s\n", err)
+				continue
+			}
+			if err := ww.chatDB.Message.Put(ctx, *deviceID, chatJID, messages); err != nil {
+				failedToSaveMessages += len(messages)
+				fmt.Printf("Unable to save messages: %s\n", err)
+				continue
+			} else {
+				addedMessages += len(messages)
+			}
+		}
+	}
+
+	if failedToSaveConversations > 0 || failedToSaveMessages > 0 {
+		ww.QueueMessage(view.ErrorView, fmt.Errorf("Failed to save %s conversations and %s messages", failedToSaveConversations, failedToSaveMessages))
+		return
+	} else {
+		fmt.Printf("Added %s messages from history sync", addedMessages)
+	}
+}
+
 func (ww *WhatsWhatApp) handleCommonEvents(evt interface{}) {
-	switch evt.(type) {
+	switch v := evt.(type) {
 	case *events.Connected:
 		ww.handleConnectedState(true)
 	case *events.Disconnected:
 		ww.handleConnectedState(false)
+	case *events.HistorySync:
+		ww.handleHistorySync(v)
 	}
 }
 
@@ -272,9 +369,7 @@ func (ww *WhatsWhatApp) Initialize(ctx context.Context) error {
 
 	dbLog := wlog.Stdout("Database", "DEBUG", true)
 	container := sqlstore.NewWithDB(sqlDb, "sqlite3", dbLog)
-	if err != nil {
-		return err
-	}
+
 	fmt.Println("Upgrading whatsapp database")
 	if err := container.Upgrade(); err != nil {
 		return err
