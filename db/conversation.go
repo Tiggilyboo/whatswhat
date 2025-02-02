@@ -79,7 +79,7 @@ const (
 		DO UPDATE SET
 			last_message_timestamp=CASE
 				WHEN whatsapp_history_sync_conversation.last_message_timestamp IS NULL
-				         OR excluded.last_message_timestamp > whatsapp_history_sync_conversation.last_message_timestamp
+				         OR (excluded.last_message_timestamp IS NOT NULL AND excluded.last_message_timestamp > whatsapp_history_sync_conversation.last_message_timestamp)
 					THEN excluded.last_message_timestamp
 				ELSE whatsapp_history_sync_conversation.last_message_timestamp
 			END,

@@ -111,7 +111,7 @@ func NewWhatsWhatApp(ctx context.Context, app *gtk.Application) (*WhatsWhatApp, 
 	ww.ui.members = make(map[view.Message]view.UiView)
 
 	ww.subscribeUiView(view.QrView, view.NewQrUiView(&ww))
-	ww.subscribeUiView(view.ChatView, view.NewChatView(&ww))
+	ww.subscribeUiView(view.ChatListView, view.NewChatView(&ww))
 	ww.subscribeUiView(view.ProfileView, view.NewProfileUiView(&ww))
 
 	msgView := view.NewMessageView(&ww)
@@ -145,7 +145,7 @@ func NewWhatsWhatApp(ctx context.Context, app *gtk.Application) (*WhatsWhatApp, 
 	ww.window.SetTitle("WhatsWhat")
 	ww.window.SetTitlebar(ww.header)
 
-	ww.QueueMessage(view.ChatView, nil)
+	ww.QueueMessage(view.ChatListView, nil)
 	ww.back.SetVisible(false)
 
 	return &ww, nil
@@ -404,13 +404,12 @@ func (ww *WhatsWhatApp) Initialize(ctx context.Context) error {
 		ww.QueueMessage(view.QrView, nil)
 		ww.profile.SetVisible(false)
 	} else {
-
 		// Already logged in, connect
 		if err = ww.client.Connect(); err != nil {
 			return err
 		}
 		ww.profile.SetVisible(true)
-		ww.QueueMessage(view.ChatView, nil)
+		ww.QueueMessage(view.ChatListView, nil)
 	}
 
 	return nil

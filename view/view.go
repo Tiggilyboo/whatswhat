@@ -15,6 +15,7 @@ const (
 	LoadingView
 	ErrorView
 	QrView
+	ChatListView
 	ChatView
 	ProfileView
 )

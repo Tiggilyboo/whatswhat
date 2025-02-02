@@ -9,37 +9,37 @@ import (
 	"go.mau.fi/whatsmeow/types"
 )
 
-type ConversationMemberInfo struct {
+type ConversationMemberModel struct {
 	types.ContactInfo
 	JID types.JID
 }
 
-type ConversationInfo struct {
+type ConversationModel struct {
 	ChatJID              types.JID
 	Name                 string
-	Members              []ConversationMemberInfo
+	Members              []ConversationMemberModel
 	Unread               bool
 	LastMessageTimestamp time.Time
 }
 
-func GetConversationInfo(client *whatsmeow.Client, convo *db.Conversation, contacts map[types.JID]types.ContactInfo, detailed bool) (*ConversationInfo, error) {
+func GetConversationModel(client *whatsmeow.Client, convo *db.Conversation, contacts map[types.JID]types.ContactInfo, detailed bool) (*ConversationModel, error) {
 	chatName := convo.Name
 	unread := false
 	if convo.MarkedAsUnread != nil {
 		unread = *convo.MarkedAsUnread
 	}
-	var members []ConversationMemberInfo
+	var members []ConversationMemberModel
 
 	switch convo.ChatJID.Server {
 	case types.DefaultUserServer:
-		var members []ConversationMemberInfo
+		var members []ConversationMemberModel
 		if detailed {
-			members = make([]ConversationMemberInfo, 2)
+			members = make([]ConversationMemberModel, 2)
 			otherContact, ok := contacts[convo.ChatJID.ToNonAD()]
 			if !ok {
 				return nil, fmt.Errorf("Unable to find other contact in chat: %s", convo.ChatJID)
 			}
-			members[0] = ConversationMemberInfo{
+			members[0] = ConversationMemberModel{
 				ContactInfo: otherContact,
 				JID:         convo.ChatJID,
 			}
@@ -47,7 +47,7 @@ func GetConversationInfo(client *whatsmeow.Client, convo *db.Conversation, conta
 			if !ok {
 				return nil, fmt.Errorf("Unable to find current user contact in chat: %s", convo.ChatJID)
 			}
-			members[1] = ConversationMemberInfo{
+			members[1] = ConversationMemberModel{
 				ContactInfo: currentContact,
 				JID:         *client.Store.ID,
 			}
@@ -61,7 +61,7 @@ func GetConversationInfo(client *whatsmeow.Client, convo *db.Conversation, conta
 			}
 			chatName = info.ThreadMeta.Name.Text
 		}
-		members = make([]ConversationMemberInfo, 0)
+		members = make([]ConversationMemberModel, 0)
 
 	case types.GroupServer:
 
@@ -70,7 +70,7 @@ func GetConversationInfo(client *whatsmeow.Client, convo *db.Conversation, conta
 			if err != nil {
 				return nil, err
 			}
-			members := make([]ConversationMemberInfo, len(info.Participants))
+			members := make([]ConversationMemberModel, len(info.Participants))
 			groupParticipants := info.Participants
 			for _, p := range groupParticipants {
 				memberContact, ok := contacts[p.JID.ToNonAD()]
@@ -82,7 +82,7 @@ func GetConversationInfo(client *whatsmeow.Client, convo *db.Conversation, conta
 					}
 				}
 
-				members = append(members, ConversationMemberInfo{
+				members = append(members, ConversationMemberModel{
 					ContactInfo: memberContact,
 					JID:         p.JID,
 				})
@@ -93,7 +93,7 @@ func GetConversationInfo(client *whatsmeow.Client, convo *db.Conversation, conta
 		return nil, fmt.Errorf("unsupported server %s", convo.ChatJID.Server)
 	}
 
-	return &ConversationInfo{
+	return &ConversationModel{
 		ChatJID:              convo.ChatJID,
 		Name:                 chatName,
 		Members:              members,

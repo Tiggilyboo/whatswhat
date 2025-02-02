@@ -177,7 +177,7 @@ func (qr *QrUiView) success() {
 	qr.qrImage.SetVisible(false)
 	qr.description.SetLabel("Success! Loading...")
 
-	qr.parent.QueueMessage(ChatView, nil)
+	qr.parent.QueueMessage(ChatListView, nil)
 }
 
 func (qr *QrUiView) consumeQrMessages() {
