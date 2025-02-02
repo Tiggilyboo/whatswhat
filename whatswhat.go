@@ -111,8 +111,9 @@ func NewWhatsWhatApp(ctx context.Context, app *gtk.Application) (*WhatsWhatApp, 
 	ww.ui.members = make(map[view.Message]view.UiView)
 
 	ww.subscribeUiView(view.QrView, view.NewQrUiView(&ww))
-	ww.subscribeUiView(view.ChatListView, view.NewChatView(&ww))
+	ww.subscribeUiView(view.ChatListView, view.NewChatListView(&ww))
 	ww.subscribeUiView(view.ProfileView, view.NewProfileUiView(&ww))
+	ww.subscribeUiView(view.ChatView, view.NewChatView(&ww))
 
 	msgView := view.NewMessageView(&ww)
 	ww.subscribeUiView(view.ErrorView, msgView)
@@ -122,9 +123,19 @@ func NewWhatsWhatApp(ctx context.Context, app *gtk.Application) (*WhatsWhatApp, 
 	ww.back.SetTooltipText("Back")
 	ww.back.ConnectClicked(func() {
 		last := ww.ui.history.Pop()
-		fmt.Println("Clicked back from: ", last)
-
 		current := ww.ui.history.Peek()
+		for {
+			if last == current {
+				if ww.ui.history.Len() > 1 {
+					current = ww.ui.history.Pop()
+				} else {
+					break
+				}
+			} else {
+				break
+			}
+		}
+		fmt.Printf("Clicked back from: %s to %s (%d left in the stack)", last, current, ww.ui.history.Len())
 		ww.pushUiView(current)
 	})
 
@@ -207,8 +218,6 @@ func (ww *WhatsWhatApp) pushUiView(v view.Message) {
 			}
 		}
 	}
-
-	ww.ui.SetVisibleChild(member)
 	ww.ui.current = member
 
 	// Loading is special, we pop it as well from history before pushing the next view
@@ -216,12 +225,16 @@ func (ww *WhatsWhatApp) pushUiView(v view.Message) {
 		ww.ui.history.Pop()
 	}
 
-	ww.ui.history.Push(v)
-	if ww.ui.history.Len() <= 1 {
-		ww.back.SetVisible(false)
-	} else {
-		ww.back.SetVisible(true)
-	}
+	glib.IdleAdd(func() {
+		ww.ui.SetVisibleChild(member)
+
+		if ww.ui.history.Len() <= 1 {
+			ww.back.SetVisible(false)
+		} else {
+			ww.back.SetVisible(true)
+		}
+		ww.ui.history.Push(v)
+	})
 }
 
 func (ww *WhatsWhatApp) consumeMessages() {
@@ -277,6 +290,40 @@ func (ww *WhatsWhatApp) handleConnectedState(connected bool) {
 	} else {
 		ww.profile.SetVisible(false)
 	}
+}
+func (ww *WhatsWhatApp) handleMessage(evt *events.Message) {
+
+	// TODO: Send notification on dbus
+
+	deviceJID := ww.client.Store.ID
+	existingChat, err := ww.chatDB.Conversation.Get(ww.ctx, evt.Info.Chat)
+	if err != nil {
+		ww.QueueMessage(view.ErrorView, err)
+		return
+	}
+	existingChat.LastMessageTimestamp = evt.Info.Timestamp
+
+	if err := ww.chatDB.Conversation.Put(ww.ctx, *deviceJID, existingChat); err != nil {
+		ww.QueueMessage(view.ErrorView, err)
+		return
+	}
+	//message :=
+	messages := make([]*wwdb.HistorySyncMessageTuple, 1)
+	marshaled, err := proto.Marshal(evt.Message)
+	if err != nil {
+		ww.QueueMessage(view.ErrorView, err)
+		return
+	}
+	messages[0] = &wwdb.HistorySyncMessageTuple{
+		Info:    &evt.Info,
+		Message: marshaled,
+	}
+	if err := ww.chatDB.Message.Put(ww.ctx, *deviceJID, evt.Info.Chat, messages); err != nil {
+		ww.QueueMessage(view.ErrorView, err)
+		return
+	}
+
+	// TODO: Added to DB, now update the chat UI
 }
 
 func (ww *WhatsWhatApp) handleHistorySync(evt *events.HistorySync) {
@@ -358,6 +405,8 @@ func (ww *WhatsWhatApp) handleCommonEvents(evt interface{}) {
 		ww.handleConnectedState(false)
 	case *events.HistorySync:
 		ww.handleHistorySync(v)
+	case *events.Message:
+		ww.handleMessage(v)
 	}
 }
 

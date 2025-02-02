@@ -120,6 +120,7 @@ func (ci *chatItemRow) Update(ctx context.Context, model *models.ConversationMod
 	if lastMessageText != nil {
 		lastMessage := gtk.NewLabel(*lastMessageText)
 		lastMessage.SetHAlign(gtk.AlignStart)
+		lastMessage.SetHExpand(true)
 		ci.uiBottom.Append(lastMessage)
 	}
 
@@ -128,6 +129,7 @@ func (ci *chatItemRow) Update(ctx context.Context, model *models.ConversationMod
 	}
 	if lastMessageTimestamp != nil && !lastMessageTimestamp.IsZero() {
 		lastMessageTimeLabel := gtk.NewLabel(lastMessageTimestamp.Local().Format(time.DateTime))
+		lastMessageTimeLabel.SetHExpand(true)
 		lastMessageTimeLabel.SetHAlign(gtk.AlignEnd)
 		ci.uiBottom.Append(lastMessageTimeLabel)
 	}
@@ -149,8 +151,9 @@ type ChatListUiView struct {
 	evtHandle uint32
 }
 
-func NewChatView(parent UiParent) *ChatListUiView {
+func NewChatListView(parent UiParent) *ChatListUiView {
 	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
 	v := ChatListUiView{
 		ctx:    ctx,
@@ -230,7 +233,7 @@ func (ch *ChatListUiView) Close() {
 }
 
 func (ch *ChatListUiView) Title() string {
-	return "WhatsWhat - Chat"
+	return "WhatsWhat - Conversations"
 }
 
 func (ch *ChatListUiView) handleChatSelected(row *gtk.ListBoxRow) {
@@ -250,11 +253,12 @@ func (ch *ChatListUiView) handleChatSelected(row *gtk.ListBoxRow) {
 	}
 
 	chat := chatRowUi.chat
+	ch.chatList.UnselectAll()
 	ch.parent.QueueMessage(ChatView, chat)
 }
 
 func (ch *ChatListUiView) Update(msg *UiMessage) error {
-	fmt.Println("ViewChats: Invoked")
+	fmt.Println("ChatListUiView.Update: Invoked")
 
 	if msg.Error != nil {
 		return msg.Error

@@ -92,7 +92,7 @@ var webMessageInfoConverter = dbutil.ConvertRowFn[*waWeb.WebMessageInfo](scanWeb
 func (mq *MessageQuery) GetBetween(ctx context.Context, deviceJID types.JID, chatJID types.JID, startTime, endTime *time.Time, limit int) ([]*waWeb.WebMessageInfo, error) {
 	whereClauses := ""
 	args := []any{deviceJID, chatJID}
-	argNum := 4
+	argNum := 3
 	if startTime != nil {
 		whereClauses += fmt.Sprintf(" AND timestamp >= $%d", argNum)
 		args = append(args, startTime.Unix())
@@ -101,6 +101,7 @@ func (mq *MessageQuery) GetBetween(ctx context.Context, deviceJID types.JID, cha
 	if endTime != nil {
 		whereClauses += fmt.Sprintf(" AND timestamp <= $%d", argNum)
 		args = append(args, endTime.Unix())
+		argNum++
 	}
 
 	limitClause := ""
@@ -108,6 +109,8 @@ func (mq *MessageQuery) GetBetween(ctx context.Context, deviceJID types.JID, cha
 		limitClause = fmt.Sprintf("LIMIT %d", limit)
 	}
 	query := fmt.Sprintf(getHistorySyncMessagesBetweenQueryTemplate, whereClauses, limitClause)
+
+	fmt.Println("Query: ", query)
 
 	return webMessageInfoConverter.
 		NewRowIter(mq.Query(ctx, query, args...)).
