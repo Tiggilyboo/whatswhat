@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/tiggilyboo/whatswhat/db"
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/types"
 )
@@ -18,34 +17,28 @@ type ConversationModel struct {
 	ChatJID              types.JID
 	Name                 string
 	Members              []ConversationMemberModel
-	Unread               bool
+	UnreadCount          uint
 	LastMessageTimestamp time.Time
 }
 
-func GetConversationModel(client *whatsmeow.Client, convo *db.Conversation, contacts map[types.JID]types.ContactInfo, detailed bool) (*ConversationModel, error) {
-	chatName := convo.Name
-	unread := false
-	if convo.MarkedAsUnread != nil {
-		unread = *convo.MarkedAsUnread
-	}
+func GetConversationModel(client *whatsmeow.Client, contacts map[types.JID]types.ContactInfo, chatJID types.JID, chatName string, unread uint, lastMessageTime time.Time, detailed bool) (*ConversationModel, error) {
 	var members []ConversationMemberModel
-
-	switch convo.ChatJID.Server {
+	switch chatJID.Server {
 	case types.DefaultUserServer:
 		var members []ConversationMemberModel
 		if detailed {
 			members = make([]ConversationMemberModel, 2)
-			otherContact, ok := contacts[convo.ChatJID.ToNonAD()]
+			otherContact, ok := contacts[chatJID.ToNonAD()]
 			if !ok {
-				return nil, fmt.Errorf("Unable to find other contact in chat: %s", convo.ChatJID)
+				return nil, fmt.Errorf("Unable to find other contact in chat: %s", chatJID)
 			}
 			members[0] = ConversationMemberModel{
 				ContactInfo: otherContact,
-				JID:         convo.ChatJID,
+				JID:         chatJID,
 			}
 			currentContact, ok := contacts[client.Store.ID.ToNonAD()]
 			if !ok {
-				return nil, fmt.Errorf("Unable to find current user contact in chat: %s", convo.ChatJID)
+				return nil, fmt.Errorf("Unable to find current user contact in chat: %s", chatJID)
 			}
 			members[1] = ConversationMemberModel{
 				ContactInfo: currentContact,
@@ -55,7 +48,7 @@ func GetConversationModel(client *whatsmeow.Client, convo *db.Conversation, cont
 
 	case types.NewsletterServer:
 		if detailed {
-			info, err := client.GetNewsletterInfo(convo.ChatJID)
+			info, err := client.GetNewsletterInfo(chatJID)
 			if err != nil {
 				return nil, err
 			}
@@ -66,7 +59,7 @@ func GetConversationModel(client *whatsmeow.Client, convo *db.Conversation, cont
 	case types.GroupServer:
 
 		if detailed {
-			info, err := client.GetGroupInfo(convo.ChatJID)
+			info, err := client.GetGroupInfo(chatJID)
 			if err != nil {
 				return nil, err
 			}
@@ -90,14 +83,14 @@ func GetConversationModel(client *whatsmeow.Client, convo *db.Conversation, cont
 		}
 
 	default:
-		return nil, fmt.Errorf("unsupported server %s", convo.ChatJID.Server)
+		return nil, fmt.Errorf("unsupported server %s", chatJID.Server)
 	}
 
 	return &ConversationModel{
-		ChatJID:              convo.ChatJID,
+		ChatJID:              chatJID,
 		Name:                 chatName,
 		Members:              members,
-		Unread:               unread,
-		LastMessageTimestamp: convo.LastMessageTimestamp,
+		UnreadCount:          unread,
+		LastMessageTimestamp: lastMessageTime,
 	}, nil
 }

@@ -6,7 +6,9 @@ import (
 
 	"github.com/rs/zerolog"
 	"github.com/tiggilyboo/whatswhat/db"
+	"github.com/tiggilyboo/whatswhat/services"
 	"github.com/tiggilyboo/whatswhat/view"
+	"github.com/tiggilyboo/whatswhat/view/models"
 
 	"context"
 	"fmt"
@@ -19,6 +21,7 @@ import (
 	wwdb "github.com/tiggilyboo/whatswhat/db"
 	"go.mau.fi/util/dbutil"
 	"go.mau.fi/whatsmeow"
+	"go.mau.fi/whatsmeow/proto/waHistorySync"
 	"go.mau.fi/whatsmeow/store/sqlstore"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
@@ -84,6 +87,7 @@ type WhatsWhatApp struct {
 	profile  *gtk.Button
 	client   *whatsmeow.Client
 	chatDB   *db.Database
+	notifier *services.NotificationService
 	contacts map[types.JID]types.ContactInfo
 	viewChan chan view.UiMessage
 	ctx      context.Context
@@ -102,9 +106,14 @@ func NewWhatsWhatApp(ctx context.Context, app *gtk.Application) (*WhatsWhatApp, 
 		ctx:         ctx,
 	}
 
+	notifier, err := services.NewNotificationService(ctx)
+	if err != nil {
+		return nil, err
+	}
+	ww.notifier = notifier
+
 	ww.viewChan = make(chan view.UiMessage, 10)
 	ww.ui.Stack = gtk.NewStack()
-	ww.ui.Stack.SetName("WhatsWhatStack")
 
 	ww.ui.history = NewViewStack()
 	ww.ui.SetTransitionType(gtk.StackTransitionTypeSlideLeftRight)
@@ -294,9 +303,57 @@ func (ww *WhatsWhatApp) handleConnectedState(connected bool) {
 		ww.profile.SetVisible(false)
 	}
 }
+
+func (ww *WhatsWhatApp) queueMessageNotification(evt *events.Message) {
+	msgModel, err := models.GetMessageModel(ww.client, evt.Info.Chat, evt.SourceWebMsg)
+	if err != nil {
+		ww.QueueMessage(view.ErrorView, err)
+		return
+	}
+	notification := services.Notification{
+		Summary:       msgModel.PushName,
+		Body:          msgModel.Message,
+		Icon:          "mail-unread",
+		ExpirySeconds: 5,
+	}
+	ww.notifier.QueueNotification(&notification)
+}
+
+func (ww *WhatsWhatApp) queueUnreadChatNotification(convo *waHistorySync.Conversation) {
+	ts := time.Time{}
+	if convo.LastMsgTimestamp != nil && *convo.LastMsgTimestamp > 0 {
+		ts = time.Unix(int64(*convo.LastMsgTimestamp), 0)
+	}
+	chatJID, err := types.ParseJID(*convo.ID)
+	if err != nil {
+		return
+	}
+	chatName := ""
+	if convo.Name != nil {
+		chatName = *convo.Name
+	}
+	unreadCount := uint(0)
+	if convo.UnreadCount != nil {
+		unreadCount = uint(*convo.UnreadCount)
+	}
+	convoModel, err := models.GetConversationModel(ww.client, ww.contacts, chatJID, chatName, unreadCount, ts, false)
+	if err != nil {
+		ww.QueueMessage(view.ErrorView, err)
+		return
+	}
+
+	notification := services.Notification{
+		Icon:          "mail-unread",
+		Summary:       convoModel.Name,
+		Body:          fmt.Sprintf("%d unread messages", convoModel.UnreadCount),
+		ExpirySeconds: 5,
+	}
+	ww.notifier.QueueNotification(&notification)
+}
+
 func (ww *WhatsWhatApp) handleMessage(evt *events.Message) {
 
-	// TODO: Send notification on dbus
+	ww.queueMessageNotification(evt)
 
 	deviceJID := ww.client.Store.ID
 	existingChat, err := ww.chatDB.Conversation.Get(ww.ctx, evt.Info.Chat)
@@ -323,6 +380,10 @@ func (ww *WhatsWhatApp) handleMessage(evt *events.Message) {
 	}
 	fmt.Println("Updating message in chatDB: ", messages[0].GetMassInsertValues())
 	if err := ww.chatDB.Message.Put(ww.ctx, *deviceJID, evt.Info.Chat, messages); err != nil {
+		ww.QueueMessage(view.ErrorView, err)
+		return
+	}
+	if err := ww.chatDB.Conversation.UpdateLastMessageTimestamp(ww.ctx, *deviceJID, evt.Info.Chat); err != nil {
 		ww.QueueMessage(view.ErrorView, err)
 		return
 	}
@@ -355,12 +416,16 @@ func (ww *WhatsWhatApp) handleHistorySync(evt *events.HistorySync) {
 			return
 		}
 
+		var maxTime time.Time
 		messages := make([]*wwdb.HistorySyncMessageTuple, 0, len(convo.GetMessages()))
 		for _, rawMsg := range convo.GetMessages() {
 			msgEvt, err := ww.client.ParseWebMessage(chatJID, rawMsg.GetMessage())
 			if err != nil {
 				fmt.Println("Dropping historical message due to parse error in ", chatJID)
 				continue
+			}
+			if maxTime.IsZero() || msgEvt.Info.Timestamp.After(maxTime) {
+				maxTime = msgEvt.Info.Timestamp
 			}
 
 			marshaled, err := proto.Marshal(rawMsg)
@@ -376,7 +441,21 @@ func (ww *WhatsWhatApp) handleHistorySync(evt *events.HistorySync) {
 			messages = append(messages, tuple)
 		}
 
+		// Update the last message time
+		var convoLastMsgTime time.Time
+		if convo.LastMsgTimestamp == nil || *convo.LastMsgTimestamp == 0 {
+			convoLastMsgTime = time.Time{}
+		} else {
+			convoLastMsgTime = time.Unix(int64(*convo.LastMsgTimestamp), 0)
+		}
+		if maxTime.After(convoLastMsgTime) {
+			convoLastMsgTime = maxTime
+		}
+		lastMsgUnixTs := uint64(convoLastMsgTime.Unix())
+		convo.LastMsgTimestamp = &lastMsgUnixTs
+
 		if len(messages) > 0 {
+			// Convo timestamp is the last message
 			dbConvo := wwdb.NewConversation(*deviceID, chatJID, convo)
 			if err := ww.chatDB.Conversation.Put(ctx, *deviceID, dbConvo); err != nil {
 				failedToSaveConversations += 1
@@ -390,6 +469,11 @@ func (ww *WhatsWhatApp) handleHistorySync(evt *events.HistorySync) {
 			} else {
 				addedMessages += len(messages)
 			}
+		}
+
+		// If we've received less than 10 messages, send out some notifications
+		if len(messages) > 0 || (convo.UnreadCount != nil && *convo.UnreadCount > 0) {
+			ww.queueUnreadChatNotification(convo)
 		}
 	}
 

@@ -98,7 +98,7 @@ const (
 			device_jid, chat_jid, last_message_timestamp, archived, pinned, mute_end_time,
 			end_of_history_transfer_type, ephemeral_expiration, ephemeral_setting_timestamp, marked_as_unread,
 			unread_count, name
-		FROM whatsapp_history_sync_conversation
+		FROM whatsapp_history_sync_conversation c
 		WHERE device_jid=$1 AND archived=$2
 		ORDER BY last_message_timestamp DESC
 		LIMIT $3
@@ -114,6 +114,16 @@ const (
 	deleteAllConversationsQuery = "DELETE FROM whatsapp_history_sync_conversation WHERE device_jid=$1"
 	deleteConversationQuery     = `
 		DELETE FROM whatsapp_history_sync_conversation
+		WHERE device_jid=$1 AND chat_jid=$2
+	`
+
+	updateConversationLastMessage = `
+		UPDATE whatsapp_history_sync_conversation
+		SET last_message_timestamp = (
+			SELECT MAX(timestamp)
+			FROM whatsapp_history_sync_message
+			WHERE device_jid=$1 AND chat_jid=$2
+		)
 		WHERE device_jid=$1 AND chat_jid=$2
 	`
 )
@@ -166,6 +176,10 @@ func (cq *ConversationQuery) DeleteAll(ctx context.Context, deviceJID types.JID)
 
 func (cq *ConversationQuery) Delete(ctx context.Context, deviceJID types.JID, chatJID types.JID) error {
 	return cq.Exec(ctx, deleteConversationQuery, deviceJID, chatJID)
+}
+
+func (cq *ConversationQuery) UpdateLastMessageTimestamp(ctx context.Context, deviceJID types.JID, chatJID types.JID) error {
+	return cq.Exec(ctx, updateConversationLastMessage, deviceJID, chatJID)
 }
 
 func (c *Conversation) Scan(row dbutil.Scannable) (*Conversation, error) {

@@ -32,7 +32,11 @@ func NewChatRow(ctx context.Context, parent UiParent, chat *db.Conversation) (*c
 	if err != nil {
 		return nil, err
 	}
-	chatInfo, err := models.GetConversationModel(client, chat, contacts, false)
+	unread := uint(0)
+	if chat.UnreadCount != nil {
+		unread = uint(*chat.UnreadCount)
+	}
+	chatInfo, err := models.GetConversationModel(client, contacts, chat.ChatJID, chat.Name, unread, chat.LastMessageTimestamp, false)
 	if err != nil {
 		return nil, err
 	}
@@ -81,7 +85,7 @@ func (ci *chatItemRow) Update(ctx context.Context, model *models.ConversationMod
 	ci.uiTop.Append(title)
 
 	var status *gtk.Image
-	if model.Unread {
+	if model.UnreadCount > 0 {
 		status = gtk.NewImageFromIconName("media-record-symbolic")
 	} else {
 		status = gtk.NewImage()
