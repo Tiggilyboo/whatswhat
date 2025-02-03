@@ -226,6 +226,9 @@ func (ww *WhatsWhatApp) pushUiView(v view.Message) {
 	}
 
 	glib.IdleAdd(func() {
+		title := member.Title()
+		ww.window.SetTitle(title)
+
 		ww.ui.SetVisibleChild(member)
 
 		if ww.ui.history.Len() <= 1 {
@@ -318,6 +321,7 @@ func (ww *WhatsWhatApp) handleMessage(evt *events.Message) {
 		Info:    &evt.Info,
 		Message: marshaled,
 	}
+	fmt.Println("Updating message in chatDB: ", messages[0].GetMassInsertValues())
 	if err := ww.chatDB.Message.Put(ww.ctx, *deviceJID, evt.Info.Chat, messages); err != nil {
 		ww.QueueMessage(view.ErrorView, err)
 		return

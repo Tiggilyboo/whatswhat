@@ -1,8 +1,10 @@
 package view
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"image"
 	"io"
 	"net/http"
 	"strings"
@@ -11,6 +13,7 @@ import (
 	"github.com/diamondburned/gotk4/pkg/gdk/v4"
 	"github.com/diamondburned/gotk4/pkg/glib/v2"
 	"github.com/diamondburned/gotk4/pkg/gtk/v4"
+	"github.com/diamondburned/gotk4/pkg/pango"
 	"github.com/tiggilyboo/whatswhat/view/models"
 	"go.mau.fi/whatsmeow/types/events"
 )
@@ -24,6 +27,7 @@ type messageRowUi struct {
 	uiBottom  *gtk.Box
 	timestamp *gtk.Label
 	text      *gtk.Label
+	sender    *gtk.Label
 	loaded    bool
 }
 
@@ -36,15 +40,46 @@ func NewMessageRowUi(ctx context.Context, parent UiParent, message *models.Messa
 	uiTop := gtk.NewBox(gtk.OrientationHorizontal, 5)
 	uiBottom := gtk.NewBox(gtk.OrientationHorizontal, 5)
 
-	ui.SetMarginTop(15)
 	ui.SetHExpand(true)
 	ui.SetVExpand(true)
 	ui.Append(uiTop)
 	ui.Append(uiBottom)
 
+	var senderText string
+	if message.IsFromMe {
+		senderText = "Me"
+	} else if len(message.PushName) > 0 {
+		senderText = message.PushName
+	} else {
+		contacts, err := parent.GetContacts()
+		if err != nil {
+			senderText = message.Sender.User
+		} else {
+			senderContact, ok := contacts[message.Sender.ToNonAD()]
+			if !ok {
+				senderText = message.Sender.User
+			} else {
+				senderText = senderContact.FullName
+			}
+		}
+	}
+	senderMarkup := fmt.Sprintf("<a href=\"%d/%s\">%s</a>", ProfileView, message.Sender, senderText)
+	sender := gtk.NewLabel(senderMarkup)
+	sender.SetUseMarkup(true)
+	sender.ConnectActivateLink(func(uri string) bool {
+		parent.QueueMessage(ProfileView, message.Sender.ToNonAD())
+		return true
+	})
+	sender.SetHAlign(gtk.AlignStart)
+	sender.SetVAlign(gtk.AlignStart)
+	uiTop.Append(sender)
+
 	text := gtk.NewLabel("...")
 	text.SetHExpand(true)
 	text.SetHAlign(gtk.AlignStart)
+	text.SetVAlign(gtk.AlignCenter)
+	text.SetWrap(true)
+	text.SetWrapMode(pango.WrapWord)
 	uiTop.Append(text)
 
 	var timestampLabel *gtk.Label
@@ -65,6 +100,7 @@ func NewMessageRowUi(ctx context.Context, parent UiParent, message *models.Messa
 		uiTop:      uiTop,
 		uiBottom:   uiBottom,
 		timestamp:  timestampLabel,
+		sender:     sender,
 	}
 	msg.ListBoxRow.SetChild(ui)
 	msg.ListBoxRow.SetSelectable(false)
@@ -87,7 +123,7 @@ func (mr *messageRowUi) handleRowVisible() {
 		return
 	}
 
-	mr.loadMediaContent()
+	go mr.loadMediaContent()
 }
 
 func getMedia(ctx context.Context, mediaUrl string) (*[]byte, error) {
@@ -114,18 +150,27 @@ func getMedia(ctx context.Context, mediaUrl string) (*[]byte, error) {
 	return &respBytes, nil
 }
 
-func (mr *messageRowUi) updateMediaContent(mediaType models.MessageType, mediaBytes []byte) error {
+func (mr *messageRowUi) updateMediaContent(messageType models.MessageType, mediaType string, mediaBytes []byte) error {
 
-	switch mediaType {
+	switch messageType {
 	case models.MessageTypeImage:
-		fmt.Println("Loading message image from URL")
+		fmt.Printf("Loading message image from URL with media type: %s\n", mediaType)
+		decodedImg, imgType, err := image.Decode(bytes.NewReader(mediaBytes))
+		if err != nil {
+			return err
+		}
+		mimeType := "N/A"
+		if mr.message.MimeType != nil {
+			mimeType = *mr.message.MimeType
+		}
+		fmt.Printf("Detected that the image is a %s, the data tells that it is a %s", imgType, mimeType, decodedImg.Bounds().String())
 		mediaGlibBytes := glib.NewBytes(mediaBytes)
 		mediaTexture, err := gdk.NewTextureFromBytes(mediaGlibBytes)
 		if err != nil {
 			return err
 		}
 		mediaImage := gtk.NewImageFromPaintable(mediaTexture)
-		mr.uiTop.Prepend(mediaImage)
+		mr.uiTop.Append(mediaImage)
 
 	case models.MessageTypeVideo:
 		fmt.Println("Video messages not implemented")
@@ -152,7 +197,7 @@ func (mr *messageRowUi) loadMediaContent() {
 	if message.Type != models.MessageTypeText && message.Type != models.MessageTypeUnknown {
 		if message.MediaBytes != nil {
 			fmt.Println("Trying to load media from embedded bytes")
-			err := mr.updateMediaContent(message.Type, *message.MediaBytes)
+			err := mr.updateMediaContent(message.Type, message.MediaType, *message.MediaBytes)
 			if err != nil {
 				fmt.Printf("Unable to update embedded media content: %s", err.Error())
 			}
@@ -166,7 +211,7 @@ func (mr *messageRowUi) loadMediaContent() {
 			if err != nil {
 				fmt.Printf("Unable to get media from URL: %s", err.Error())
 			}
-			err = mr.updateMediaContent(message.Type, *mediaBytes)
+			err = mr.updateMediaContent(message.Type, message.MediaType, *mediaBytes)
 			if err != nil {
 				fmt.Printf("Unable to update media content from URL: %s", err.Error())
 			}
