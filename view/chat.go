@@ -38,7 +38,12 @@ func (mr *messageRowUi) Timestamp() *time.Time {
 func NewMessageRowUi(ctx context.Context, parent UiParent, message *models.MessageModel) *messageRowUi {
 	ui := gtk.NewBox(gtk.OrientationVertical, 0)
 	uiTop := gtk.NewBox(gtk.OrientationHorizontal, 5)
+	uiTop.SetMarginEnd(10)
+	uiTop.SetMarginStart(10)
+	uiTop.SetHExpand(true)
+
 	uiBottom := gtk.NewBox(gtk.OrientationHorizontal, 5)
+	uiBottom.SetHExpand(true)
 
 	ui.SetHExpand(true)
 	ui.SetVExpand(true)
@@ -72,15 +77,17 @@ func NewMessageRowUi(ctx context.Context, parent UiParent, message *models.Messa
 	})
 	sender.SetHAlign(gtk.AlignStart)
 	sender.SetVAlign(gtk.AlignStart)
+	sender.SetHExpand(true)
 	uiTop.Append(sender)
 
 	text := gtk.NewLabel("...")
-	text.SetHExpand(true)
 	text.SetHAlign(gtk.AlignStart)
-	text.SetVAlign(gtk.AlignCenter)
+	text.SetVAlign(gtk.AlignStart)
+	text.SetHExpand(true)
 	text.SetWrap(true)
-	text.SetWrapMode(pango.WrapWord)
-	uiTop.Append(text)
+	text.SetSelectable(true)
+	text.SetWrapMode(pango.WrapWordChar)
+	ui.Append(text)
 
 	var timestampLabel *gtk.Label
 	if time.Now().Format(time.DateOnly) == message.Timestamp.Format(time.DateOnly) {
@@ -89,7 +96,7 @@ func NewMessageRowUi(ctx context.Context, parent UiParent, message *models.Messa
 		timestampLabel = gtk.NewLabel(message.Timestamp.Format(time.DateTime))
 	}
 	timestampLabel.SetHAlign(gtk.AlignEnd)
-	uiBottom.Append(timestampLabel)
+	uiTop.Append(timestampLabel)
 
 	msg := messageRowUi{
 		ListBoxRow: gtk.NewListBoxRow(),
@@ -230,7 +237,7 @@ type ChatUiView struct {
 	scrolledUi  *gtk.ScrolledWindow
 	parent      UiParent
 	composeUi   *gtk.Box
-	composeText *gtk.Text
+	composeText *gtk.Entry
 	send        *gtk.Button
 	messageList *gtk.ListBox
 	messageRows []*messageRowUi
@@ -272,16 +279,16 @@ func NewChatView(parent UiParent) *ChatUiView {
 	v.scrolledUi.SetChild(v.messageList)
 	v.Box.Append(v.scrolledUi)
 
-	composeUi := gtk.NewBox(gtk.OrientationHorizontal, 5)
+	composeUi := gtk.NewBox(gtk.OrientationHorizontal, 0)
 	v.composeUi = composeUi
 	v.Box.Append(composeUi)
 
-	v.composeText = gtk.NewText()
+	v.composeText = gtk.NewEntry()
 	v.composeText.SetHExpand(true)
+	v.SetSizeRequest(-1, -1)
 	v.composeUi.Append(v.composeText)
 
 	v.send = gtk.NewButtonWithLabel("Send")
-	v.send.SetHAlign(gtk.AlignEnd)
 	v.send.ConnectClicked(v.handleSendClicked)
 	v.composeUi.Append(v.send)
 
