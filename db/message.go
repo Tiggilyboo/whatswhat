@@ -66,6 +66,7 @@ func (mq *MessageQuery) Put(ctx context.Context, deviceJID types.JID, chatJID ty
 			query, params := batchInsertHistorySyncMessage.Build([3]any{deviceJID, chatJID, time.Now().Unix()}, chunk)
 			_, err := mq.Exec(ctx, query, params...)
 			if err != nil {
+				fmt.Printf("Unable to execute: %s\n with params: %v\n", query, params)
 				return err
 			}
 		}
@@ -119,20 +120,32 @@ func (mq *MessageQuery) GetBetween(ctx context.Context, deviceJID types.JID, cha
 
 func (mq *MessageQuery) DeleteBetween(ctx context.Context, deviceJID types.JID, chatJID types.JID, before, after uint64) error {
 	_, err := mq.Exec(ctx, deleteHistorySyncMessagesBetweenQuery, deviceJID, chatJID, before, after)
+	if err != nil {
+		fmt.Printf("Unable to execute: %s\n with params: %v\n", deleteHistorySyncMessagesBetweenQuery, []any{deviceJID, chatJID, before, after})
+	}
 	return err
 }
 
 func (mq *MessageQuery) DeleteAll(ctx context.Context, deviceJID types.JID) error {
 	_, err := mq.Exec(ctx, deleteAllHistorySyncMessagesQuery, deviceJID)
+	if err != nil {
+		fmt.Printf("Unable to execute: %s\n with params: %v\n", deleteAllHistorySyncMessagesQuery, deviceJID)
+	}
 	return err
 }
 
 func (mq *MessageQuery) DeleteAllInChat(ctx context.Context, deviceJID types.JID, chatJID types.JID) error {
 	_, err := mq.Exec(ctx, deleteHistorySyncMessagesForPortalQuery, deviceJID, chatJID)
+	if err != nil {
+		fmt.Printf("Unable to execute: %s\n with params: %v\n", deleteHistorySyncMessagesForPortalQuery, []any{deviceJID, chatJID})
+	}
 	return err
 }
 
 func (mq *MessageQuery) ConversationHasMessages(ctx context.Context, deviceJID types.JID, chatJID types.JID) (exists bool, err error) {
 	err = mq.QueryRow(ctx, conversationHasHistorySyncMessagesQuery, deviceJID, chatJID).Scan(&exists)
+	if err != nil {
+		fmt.Printf("Unable to execute: %s\n with params: %v\n", conversationHasHistorySyncMessagesQuery, []any{deviceJID, chatJID})
+	}
 	return
 }

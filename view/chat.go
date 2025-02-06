@@ -1,10 +1,8 @@
 package view
 
 import (
-	"bytes"
 	"context"
 	"fmt"
-	"image"
 	"io"
 	"net/http"
 	"strings"
@@ -25,6 +23,7 @@ type messageRowUi struct {
 	ui        *gtk.Box
 	uiTop     *gtk.Box
 	uiBottom  *gtk.Box
+	uiMedia   *gtk.Box
 	timestamp *gtk.Label
 	text      *gtk.Label
 	sender    *gtk.Label
@@ -42,12 +41,16 @@ func NewMessageRowUi(ctx context.Context, parent UiParent, message *models.Messa
 	uiTop.SetMarginStart(10)
 	uiTop.SetHExpand(true)
 
+	uiMedia := gtk.NewBox(gtk.OrientationHorizontal, 5)
+	uiMedia.SetHExpand(true)
+
 	uiBottom := gtk.NewBox(gtk.OrientationHorizontal, 5)
 	uiBottom.SetHExpand(true)
 
 	ui.SetHExpand(true)
 	ui.SetVExpand(true)
 	ui.Append(uiTop)
+	ui.Append(uiMedia)
 	ui.Append(uiBottom)
 
 	var senderText string
@@ -87,7 +90,7 @@ func NewMessageRowUi(ctx context.Context, parent UiParent, message *models.Messa
 	text.SetWrap(true)
 	text.SetSelectable(true)
 	text.SetWrapMode(pango.WrapWordChar)
-	ui.Append(text)
+	uiBottom.Append(text)
 
 	var timestampLabel *gtk.Label
 	if time.Now().Format(time.DateOnly) == message.Timestamp.Format(time.DateOnly) {
@@ -95,6 +98,7 @@ func NewMessageRowUi(ctx context.Context, parent UiParent, message *models.Messa
 	} else {
 		timestampLabel = gtk.NewLabel(message.Timestamp.Format(time.DateTime))
 	}
+	timestampLabel.SetSensitive(false)
 	timestampLabel.SetHAlign(gtk.AlignEnd)
 	uiTop.Append(timestampLabel)
 
@@ -106,6 +110,7 @@ func NewMessageRowUi(ctx context.Context, parent UiParent, message *models.Messa
 		ui:         ui,
 		uiTop:      uiTop,
 		uiBottom:   uiBottom,
+		uiMedia:    uiMedia,
 		timestamp:  timestampLabel,
 		sender:     sender,
 	}
@@ -133,7 +138,7 @@ func (mr *messageRowUi) handleRowVisible() {
 	go mr.loadMediaContent()
 }
 
-func getMedia(ctx context.Context, mediaUrl string) (*[]byte, error) {
+func (mr *messageRowUi) getMedia(ctx context.Context, mediaUrl string) (*[]byte, error) {
 	fmt.Printf("Get %s\n", mediaUrl)
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, mediaUrl, nil)
@@ -152,33 +157,27 @@ func getMedia(ctx context.Context, mediaUrl string) (*[]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	fmt.Printf("Got %d bytes\n", resp.ContentLength)
+	fmt.Printf("Got %d status (%s) with %d bytes\n", resp.StatusCode, resp.Header.Get("Content-Type"), resp.ContentLength)
 
 	return &respBytes, nil
 }
 
-func (mr *messageRowUi) updateMediaContent(messageType models.MessageType, mediaType string, mediaBytes []byte) error {
+func (mr *messageRowUi) updateMediaContent(mediaBytes []byte) error {
+	mime := mr.message.Media.GetMimetype()
+	fmt.Printf("Updating UI with bytes of mime type: %s", mime)
 
-	switch messageType {
+	switch mr.message.MsgType {
 	case models.MessageTypeImage:
-		fmt.Printf("Loading message image from URL with media type: %s\n", mediaType)
-		decodedImg, imgType, err := image.Decode(bytes.NewReader(mediaBytes))
-		if err != nil {
-			return err
-		}
-		mimeType := "N/A"
-		if mr.message.MimeType != nil {
-			mimeType = *mr.message.MimeType
-		}
-		fmt.Printf("Detected that the image is a %s, the data tells that it is a %s", imgType, mimeType, decodedImg.Bounds().String())
 		mediaGlibBytes := glib.NewBytes(mediaBytes)
 		mediaTexture, err := gdk.NewTextureFromBytes(mediaGlibBytes)
 		if err != nil {
 			return err
 		}
 		mediaImage := gtk.NewImageFromPaintable(mediaTexture)
-		mr.uiTop.Append(mediaImage)
-
+		if imageMsg, ok := mr.message.Media.(models.MediaMessageWithDimensions); ok {
+			mediaImage.SetSizeRequest(int(imageMsg.GetWidth()), int(imageMsg.GetHeight()))
+		}
+		mr.uiMedia.Append(mediaImage)
 	case models.MessageTypeVideo:
 		fmt.Println("Video messages not implemented")
 	case models.MessageTypeAudio:
@@ -201,27 +200,16 @@ func (mr *messageRowUi) loadMediaContent() {
 		return
 	}
 
-	if message.Type != models.MessageTypeText && message.Type != models.MessageTypeUnknown {
-		if message.MediaBytes != nil {
-			fmt.Println("Trying to load media from embedded bytes")
-			err := mr.updateMediaContent(message.Type, message.MediaType, *message.MediaBytes)
-			if err != nil {
-				fmt.Printf("Unable to update embedded media content: %s", err.Error())
-			}
-		}
-		if !mr.loaded && message.URL != nil {
-			fmt.Println("Trying to load media from URL")
-			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-			defer cancel()
+	if !mr.loaded && message.Media != nil {
+		fmt.Println("Trying to load media from URL")
 
-			mediaBytes, err := getMedia(ctx, *message.URL)
-			if err != nil {
-				fmt.Printf("Unable to get media from URL: %s", err.Error())
-			}
-			err = mr.updateMediaContent(message.Type, message.MediaType, *mediaBytes)
-			if err != nil {
-				fmt.Printf("Unable to update media content from URL: %s", err.Error())
-			}
+		mediaBytes, err := mr.parent.GetChatClient().Download(message.Media)
+		if err != nil {
+			fmt.Printf("Unable to get media from URL: %s", err.Error())
+		}
+		err = mr.updateMediaContent(mediaBytes)
+		if err != nil {
+			fmt.Printf("Unable to update media content from URL: %s", err.Error())
 		}
 	}
 
