@@ -20,15 +20,22 @@ const (
 	ProfileView
 )
 
+type Response uint8
+
+const (
+	ResponsePushView Response = iota
+	ResponseIgnore
+)
+
 type UiMessage struct {
 	Identifier Message
 	Payload    interface{}
-	Error      error
+	Intent     Response
 }
 
 type UiView interface {
 	gtk.Widgetter
-	Update(msg *UiMessage) error
+	Update(msg *UiMessage) (Response, error)
 	Done() <-chan struct{}
 	Close()
 	Title() string
@@ -36,7 +43,9 @@ type UiView interface {
 
 type UiParent interface {
 	QueueMessage(v Message, payload interface{})
+	QueueMessageWithIntent(v Message, payload interface{}, intent Response)
 	GetChatClient() *whatsmeow.Client
 	GetChatDB() *db.Database
 	GetContacts() (map[types.JID]types.ContactInfo, error)
+	GetDeviceJID() *types.JID
 }

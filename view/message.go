@@ -43,14 +43,15 @@ func (m *MessageUiView) Close() {
 	}
 }
 
-func (m *MessageUiView) Update(msg *UiMessage) error {
+func (m *MessageUiView) Update(msg *UiMessage) (Response, error) {
 	fmt.Println("MessageUiView.Update: ", msg)
 
-	if msg.Error != nil {
-		m.message.SetLabel(msg.Error.Error())
-	} else if msg.Payload != nil {
+	switch payload := msg.Payload.(type) {
+	case error:
+		m.message.SetLabel(payload.Error())
+	default:
 		m.message.SetLabel(fmt.Sprint(msg.Payload))
 	}
 
-	return nil
+	return msg.Intent, nil
 }

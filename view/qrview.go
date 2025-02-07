@@ -2,7 +2,6 @@ package view
 
 import (
 	"context"
-	"errors"
 	"fmt"
 
 	"github.com/diamondburned/gotk4/pkg/gdk/v4"
@@ -83,23 +82,21 @@ func (qr *QrUiView) RefreshQrCode() {
 	qr.parent.QueueMessage(QrView, nil)
 }
 
-func (qr *QrUiView) Update(msg *UiMessage) error {
+func (qr *QrUiView) Update(msg *UiMessage) (Response, error) {
 	client := qr.parent.GetChatClient()
 	if client == nil {
-		return fmt.Errorf("WhatsApp client not initialized")
+		return ResponsePushView, fmt.Errorf("WhatsApp client not initialized")
 	}
 
 	if client.IsLoggedIn() {
 		qr.description.SetLabel("Already logged in.")
 		qr.refresh.SetVisible(false)
 		qr.Close()
-		return nil
+		return msg.Intent, nil
 	}
 
 	var code *string
-	if msg.Error != nil {
-		return errors.New(fmt.Sprintf("QrUiView.Update passed error: %s", msg))
-	} else if msg.Payload != nil {
+	if msg.Payload != nil {
 		codeStr := msg.Payload.(string)
 		code = &codeStr
 	}
@@ -122,11 +119,11 @@ func (qr *QrUiView) Update(msg *UiMessage) error {
 		var err error
 		qr.qrChan, err = client.GetQRChannel(qr.ctx)
 		if err != nil {
-			return err
+			return ResponsePushView, err
 		}
 
 		if err = client.Connect(); err != nil {
-			return err
+			return ResponsePushView, err
 		}
 
 		// Consume any new QR messages in another routine
@@ -144,14 +141,14 @@ func (qr *QrUiView) Update(msg *UiMessage) error {
 		var qrCodeBytes []byte
 		qrCodeBytes, err := qrcode.Encode(*code, qrcode.Medium, 512)
 		if err != nil {
-			return err
+			return ResponsePushView, err
 		}
 
 		fmt.Println("Making texture from QR code PNG bytes")
 		qrCodeGlibBytes := glib.NewBytes(qrCodeBytes)
 		texture, err := gdk.NewTextureFromBytes(qrCodeGlibBytes)
 		if err != nil {
-			return err
+			return ResponsePushView, err
 		}
 		fmt.Println("Making image from paintable texture")
 		imageUi = gtk.NewImageFromPaintable(texture)
@@ -169,7 +166,7 @@ func (qr *QrUiView) Update(msg *UiMessage) error {
 	qr.SetVisible(true)
 	qr.qrImage.SetVisible(true)
 
-	return nil
+	return msg.Intent, nil
 }
 
 func (qr *QrUiView) success() {
@@ -196,8 +193,8 @@ func (qr *QrUiView) consumeQrMessages() {
 
 			if evt.Error != nil {
 				qr.Update(&UiMessage{
-					Identifier: QrView,
-					Error:      evt.Error,
+					Identifier: ErrorView,
+					Payload:    evt.Error,
 				})
 				break
 			}

@@ -3,12 +3,14 @@ package models
 import (
 	"encoding/base64"
 	"fmt"
+	"regexp"
+	"time"
 
 	"go.mau.fi/util/exmime"
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/proto/waE2E"
-	"go.mau.fi/whatsmeow/proto/waWeb"
-	wmtypes "go.mau.fi/whatsmeow/types"
+	"go.mau.fi/whatsmeow/types"
+	"go.mau.fi/whatsmeow/types/events"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -23,8 +25,16 @@ const (
 	MessageTypeDocument
 )
 
+var inlineURLRegex = regexp.MustCompile(`\[(.+?)]\((.+?)\)`)
+
 type MessageModel struct {
-	wmtypes.MessageInfo
+	ID          types.MessageID
+	ChatJID     types.JID
+	SenderJID   types.JID
+	PushName    string
+	IsFromMe    bool
+	IsGroup     bool
+	Timestamp   time.Time
 	Media       MediaMessage
 	MsgType     MessageType
 	Message     string
@@ -65,22 +75,37 @@ type MediaMessageWithDuration interface {
 	GetSeconds() uint32
 }
 
-func GetMessageModel(client *whatsmeow.Client, chatJID wmtypes.JID, msg *waWeb.WebMessageInfo) (*MessageModel, error) {
-	evt, err := client.ParseWebMessage(chatJID, msg)
-	if err != nil {
-		return nil, err
+func NewPendingMessage(id types.MessageID, chatJID types.JID, senderJID types.JID, pushName string, message string) MessageModel {
+	return MessageModel{
+		ID:        id,
+		ChatJID:   chatJID,
+		SenderJID: senderJID,
+		PushName:  pushName,
+		Message:   message,
+		Timestamp: time.Now(),
+		IsFromMe:  true,
 	}
-	emsg := evt.Message
+}
 
+func GetMessageModel(client *whatsmeow.Client, chatJID types.JID, msg *events.Message) (*MessageModel, error) {
+	info := msg.Info
 	model := MessageModel{
-		MessageInfo: evt.Info,
-		MsgType:     MessageTypeUnknown,
+		ID:        info.ID,
+		ChatJID:   info.Chat,
+		SenderJID: info.Sender,
+		PushName:  info.PushName,
+		IsFromMe:  info.IsFromMe,
+		IsGroup:   info.IsGroup,
+		Timestamp: info.Timestamp,
+		MsgType:   MessageTypeUnknown,
 	}
 
+	emsg := msg.Message
 	switch {
 	case emsg == nil:
 		model.MsgType = MessageTypeText
 		model.Message = "Unable to parse message"
+
 	case emsg.Conversation != nil, msg.Message.ExtendedTextMessage != nil:
 		model.MsgType = MessageTypeText
 		model.Message = emsg.GetConversation()
@@ -90,6 +115,7 @@ func GetMessageModel(client *whatsmeow.Client, chatJID wmtypes.JID, msg *waWeb.W
 				model.Message = *extmsg.Text
 			}
 		}
+
 	case emsg.TemplateMessage != nil:
 		tplMsg := emsg.GetTemplateMessage()
 		tpl := tplMsg.GetHydratedTemplate()
@@ -138,6 +164,10 @@ func GetMessageModel(client *whatsmeow.Client, chatJID wmtypes.JID, msg *waWeb.W
 		model.Message = fmt.Sprintf("Error parsing: %s", encodedMsg)
 	}
 
+	if model.MsgType == MessageTypeText {
+		model.convertRawTextToMarkup(emsg)
+	}
+
 	return &model, nil
 }
 
@@ -169,4 +199,22 @@ func (mm *MessageModel) convertMediaMessage(rawMsg MediaMessage) {
 	} else {
 		mm.Message = "Unsupported media type"
 	}
+}
+
+func (mm *MessageModel) convertRawTextToMarkup(msg *waE2E.Message) {
+	if msg == nil {
+		return
+	}
+	if len(msg.GetExtendedTextMessage().GetText()) > 0 {
+		mm.Message = msg.GetExtendedTextMessage().GetText()
+	} else {
+		mm.Message = msg.GetConversation()
+	}
+	mm.ContextInfo = msg.GetExtendedTextMessage().GetContextInfo()
+
+	// Replace links with html
+	mm.Message = inlineURLRegex.ReplaceAllStringFunc(mm.Message, func(s string) string {
+		groups := inlineURLRegex.FindStringSubmatch(s)
+		return fmt.Sprintf(`<a href="%s">%s</a>`, groups[2], groups[1])
+	})
 }

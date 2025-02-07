@@ -75,7 +75,7 @@ func (pv *ProfileUiView) Title() string {
 	return "WhatsWhat - Profile"
 }
 
-func (pv *ProfileUiView) Update(msg *UiMessage) error {
+func (pv *ProfileUiView) Update(msg *UiMessage) (Response, error) {
 	fmt.Println("ProfileUiView.Update: ", msg)
 
 	// Clear any old state
@@ -85,9 +85,6 @@ func (pv *ProfileUiView) Update(msg *UiMessage) error {
 	pv.profile.Clear()
 	pv.profile.SetVisible(false)
 
-	if msg.Error != nil {
-		return msg.Error
-	}
 	pv.ctx, pv.cancel = context.WithTimeout(context.Background(), 5*time.Second)
 	defer pv.cancel()
 
@@ -101,26 +98,26 @@ func (pv *ProfileUiView) Update(msg *UiMessage) error {
 		case types.JID:
 			payloadId, ok := msg.Payload.(types.JID)
 			if !ok {
-				return errors.New("Error casting user jid")
+				return ResponsePushView, errors.New("Error casting user jid")
 			}
 			userJID = payloadId
 		case profileUiViewUpdate:
 			payloadUpdate, ok := msg.Payload.(profileUiViewUpdate)
 			if !ok {
-				return errors.New("Error casting profile update")
+				return ResponsePushView, errors.New("Error casting profile update")
 			}
 			pv.queueUpdate(&payloadUpdate)
-			return nil
+			return ResponsePushView, nil
 
 		default:
-			return fmt.Errorf("Unexpected profile message payload: %s", msg.Payload)
+			return ResponsePushView, fmt.Errorf("Unexpected profile message payload: %s", msg.Payload)
 		}
 	}
 
 	ctx, payloadCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	go pv.getProfilePayload(ctx, payloadCancel, userJID)
 
-	return nil
+	return msg.Intent, nil
 }
 
 func (pv *ProfileUiView) queueUpdate(update *profileUiViewUpdate) {

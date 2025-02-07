@@ -13,6 +13,7 @@ import (
 	"github.com/diamondburned/gotk4/pkg/gtk/v4"
 	"github.com/diamondburned/gotk4/pkg/pango"
 	"github.com/tiggilyboo/whatswhat/view/models"
+	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/types/events"
 )
 
@@ -61,21 +62,21 @@ func NewMessageRowUi(ctx context.Context, parent UiParent, message *models.Messa
 	} else {
 		contacts, err := parent.GetContacts()
 		if err != nil {
-			senderText = message.Sender.User
+			senderText = message.SenderJID.User
 		} else {
-			senderContact, ok := contacts[message.Sender.ToNonAD()]
+			senderContact, ok := contacts[message.SenderJID.ToNonAD()]
 			if !ok {
-				senderText = message.Sender.User
+				senderText = message.SenderJID.User
 			} else {
 				senderText = senderContact.FullName
 			}
 		}
 	}
-	senderMarkup := fmt.Sprintf("<a href=\"%d/%s\">%s</a>", ProfileView, message.Sender, senderText)
+	senderMarkup := fmt.Sprintf("<a href=\"%d/%s\">%s</a>", ProfileView, message.SenderJID, senderText)
 	sender := gtk.NewLabel(senderMarkup)
 	sender.SetUseMarkup(true)
 	sender.ConnectActivateLink(func(uri string) bool {
-		parent.QueueMessage(ProfileView, message.Sender.ToNonAD())
+		parent.QueueMessage(ProfileView, message.SenderJID.ToNonAD())
 		return true
 	})
 	sender.SetHAlign(gtk.AlignStart)
@@ -84,6 +85,7 @@ func NewMessageRowUi(ctx context.Context, parent UiParent, message *models.Messa
 	uiTop.Append(sender)
 
 	text := gtk.NewLabel("...")
+	text.SetUseMarkup(true)
 	text.SetHAlign(gtk.AlignStart)
 	text.SetVAlign(gtk.AlignStart)
 	text.SetHExpand(true)
@@ -215,23 +217,24 @@ func (mr *messageRowUi) loadMediaContent() {
 
 	if len(message.Message) > 0 {
 		glib.IdleAdd(func() {
-			mr.text.SetText(message.Message)
+			mr.text.SetMarkup(message.Message)
 		})
 	}
 }
 
 type ChatUiView struct {
 	*gtk.Box
-	scrolledUi  *gtk.ScrolledWindow
-	parent      UiParent
-	composeUi   *gtk.Box
-	composeText *gtk.Entry
-	send        *gtk.Button
-	messageList *gtk.ListBox
-	messageRows []*messageRowUi
-	chat        *models.ConversationModel
-	topRow      *messageRowUi
-	bottomRow   *messageRowUi
+	scrolledUi     *gtk.ScrolledWindow
+	parent         UiParent
+	composeUi      *gtk.Box
+	composeText    *gtk.Entry
+	send           *gtk.Button
+	messageList    *gtk.ListBox
+	messageRows    []*messageRowUi
+	chat           *models.ConversationModel
+	topRow         *messageRowUi
+	bottomRow      *messageRowUi
+	messagePending *messageRowUi
 
 	ctx       context.Context
 	cancel    context.CancelFunc
@@ -320,16 +323,12 @@ func (ch *ChatUiView) chatEventHandler(evt interface{}) {
 	}
 }
 
-func (ch *ChatUiView) Update(msg *UiMessage) error {
+func (ch *ChatUiView) Update(msg *UiMessage) (Response, error) {
 	fmt.Println("ChatUiView.Update: Invoked")
-
-	if msg.Error != nil {
-		return msg.Error
-	}
 
 	client := ch.parent.GetChatClient()
 	if client == nil || !client.IsConnected() {
-		return nil
+		return msg.Intent, nil
 	}
 	if ch.evtHandle != 0 {
 		ch.Close()
@@ -339,7 +338,7 @@ func (ch *ChatUiView) Update(msg *UiMessage) error {
 	case *models.ConversationModel:
 		ch.chat = t
 	default:
-		return fmt.Errorf("Unable to handle message payload: %s", t)
+		return ResponsePushView, fmt.Errorf("Unable to handle message payload: %s", t)
 	}
 
 	ch.ctx, ch.cancel = context.WithDeadline(context.Background(), time.Now().Add(2*time.Second))
@@ -349,14 +348,14 @@ func (ch *ChatUiView) Update(msg *UiMessage) error {
 	ch.evtHandle = client.AddEventHandler(ch.chatEventHandler)
 
 	if !client.IsLoggedIn() {
-		return nil
+		return msg.Intent, nil
 	}
 
 	// Fetch initial chat messages
 	now := time.Now()
 	ch.LoadMessages(nil, &now, 30)
 
-	return nil
+	return msg.Intent, nil
 }
 
 func (ch *ChatUiView) ClearMessages(startTimestamp *time.Time, endTimestamp *time.Time) {
@@ -427,7 +426,16 @@ func (ch *ChatUiView) LoadMessages(startTimestamp *time.Time, endTimestamp *time
 	// Convert messages to models
 	msgModels := make([]*models.MessageModel, len(messages))
 	for i, message := range messages {
-		model, err := models.GetMessageModel(client, ch.chat.ChatJID, message)
+
+		// convert to message event
+		msgEvent, err := client.ParseWebMessage(ch.chat.ChatJID, message)
+		if err != nil {
+			ch.parent.QueueMessage(ErrorView, err)
+			return
+		}
+
+		// convert to UI model
+		model, err := models.GetMessageModel(client, ch.chat.ChatJID, msgEvent)
 		if err != nil {
 			ch.parent.QueueMessage(ErrorView, err)
 			return
@@ -449,6 +457,89 @@ func (ch *ChatUiView) LoadMessages(startTimestamp *time.Time, endTimestamp *time
 }
 
 func (ch *ChatUiView) handleSendClicked() {
+	ch.send.SetLabel("Sending...")
+
+	// Check for existing pending message that is being sent
+	// There can only be one
+	if ch.messagePending != nil {
+		return
+	}
+
+	deviceJID := ch.parent.GetDeviceJID()
+	if deviceJID == nil {
+		fmt.Printf("DeviceJID empty when trying to send message")
+		ch.parent.QueueMessage(ChatListView, nil)
+		return
+	}
+
+	// Cancel any existing context
+	if ch.cancel != nil {
+		ch.cancel()
+	}
+
+	// Start a new one for the sending action
+	ch.ctx, ch.cancel = context.WithTimeout(context.Background(), 30*time.Second)
+	context.AfterFunc(ch.ctx, func() {
+		ch.removePendingMessage(ch.cancel)
+	})
+
 	msgText := strings.Clone(ch.composeText.Text())
 	fmt.Printf("Send event: %s\n", msgText)
+
+	msgModel := models.NewPendingMessage("Pending", ch.chat.ChatJID, *deviceJID, "Me", msgText)
+	pending := NewMessageRowUi(ch.ctx, ch.parent, &msgModel)
+
+	// Append the pending message to the list
+	ch.messageList.Append(pending)
+	ch.messageRows = append(ch.messageRows, pending)
+	ch.messagePending = pending
+
+	go ch.sendPendingMessage(ch.ctx, &msgModel)
+}
+
+func (ch *ChatUiView) removePendingMessage(cancel context.CancelFunc) {
+	defer cancel()
+
+	// Reset label
+	ch.send.SetLabel("Send")
+
+	if ch.messagePending == nil {
+		return
+	}
+	// Sent?
+	if ch.messagePending.message.ID != "Pending" {
+		ch.messagePending = nil
+		return
+	}
+
+	// Remove it, timed out
+	lastRow := ch.messageRows[len(ch.messageRows)-1]
+	if lastRow != ch.messagePending {
+		ch.parent.QueueMessage(ErrorView, fmt.Errorf("Pending message %s should be at end of chat, but was not!"))
+		return
+	}
+	ch.messageRows = ch.messageRows[:len(ch.messageRows)-2]
+	ch.messageList.Remove(ch.messagePending)
+
+	ch.parent.QueueMessage(ErrorView, fmt.Errorf("Timed out sending message"))
+}
+
+func (ch *ChatUiView) sendPendingMessage(ctx context.Context, msg *models.MessageModel) {
+	if ch.messagePending == nil {
+		// TODO: error
+		return
+	}
+	pending := ch.messagePending
+	message := waE2E.Message{
+		Conversation: &msg.Message,
+	}
+	sendReq, err := ch.parent.GetChatClient().SendMessage(ctx, ch.chat.ChatJID, &message)
+	if err == nil {
+		pending.message.ID = sendReq.ID
+		pending.message.Timestamp = sendReq.Timestamp
+	} else {
+		fmt.Printf("Error sending message: %s", err.Error())
+		return
+	}
+
 }

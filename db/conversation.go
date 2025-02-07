@@ -44,13 +44,13 @@ func NewConversation(deviceJID types.JID, chatJID types.JID, conv *waHistorySync
 	}
 	var convoName string
 	if conv.Name != nil {
-		convoName = *conv.Name
+		convoName = conv.GetName()
 	} else if conv.DisplayName != nil {
-		convoName = *conv.DisplayName
-	} else if conv.ID != nil {
-		convoName = *conv.ID
+		convoName = conv.GetDisplayName()
+	} else if conv.Username != nil {
+		convoName = conv.GetUsername()
 	} else {
-		convoName = "Group"
+		convoName = chatJID.User
 	}
 	return &Conversation{
 		DeviceJID:                 deviceJID,
@@ -166,8 +166,8 @@ func (cq *ConversationQuery) GetRecent(ctx context.Context, deviceJID types.JID,
 	return cq.QueryMany(ctx, getRecentConversations, deviceJID, archived, limitPtr)
 }
 
-func (cq *ConversationQuery) Get(ctx context.Context, chatJID types.JID) (*Conversation, error) {
-	return cq.QueryOne(ctx, getConversationByJID, chatJID)
+func (cq *ConversationQuery) Get(ctx context.Context, deviceJID types.JID, chatJID types.JID) (*Conversation, error) {
+	return cq.QueryOne(ctx, getConversationByJID, deviceJID, chatJID)
 }
 
 func (cq *ConversationQuery) DeleteAll(ctx context.Context, deviceJID types.JID) error {

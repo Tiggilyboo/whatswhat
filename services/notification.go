@@ -3,13 +3,13 @@ package services
 import (
 	"context"
 	"fmt"
-	"time"
 
 	"github.com/esiqveland/notify"
 	"github.com/godbus/dbus/v5"
 )
 
 type Notification struct {
+	ID            uint32
 	Summary       string
 	Body          string
 	Icon          string
@@ -71,7 +71,7 @@ func (n *NotificationService) consumeNotifications() {
 func (n *NotificationService) sendNotification(notification *Notification) {
 	notifyNotification := notify.Notification{
 		AppName:    "WhatsWhat",
-		ReplacesID: uint32(0),
+		ReplacesID: notification.ID,
 		AppIcon:    notification.Icon,
 		Summary:    notification.Summary,
 		Body:       notification.Body,
@@ -79,7 +79,7 @@ func (n *NotificationService) sendNotification(notification *Notification) {
 			{Key: "cancel", Label: "Cancel"},
 			{Key: "open", Label: "Open"},
 		},
-		ExpireTimeout: time.Second * time.Duration(notification.ExpirySeconds),
+		ExpireTimeout: notify.ExpireTimeoutNever,
 	}
 	id, err := n.notifier.SendNotification(notifyNotification)
 	if err != nil {

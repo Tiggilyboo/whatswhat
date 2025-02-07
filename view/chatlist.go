@@ -110,11 +110,14 @@ func (ci *chatItemRow) Update(ctx context.Context, model *models.ConversationMod
 	var lastMessageText *string
 	var lastMessageTimestamp *time.Time
 	if len(mostRecentMessages) > 0 {
-		messageModel, err := models.GetMessageModel(client, model.ChatJID, mostRecentMessages[0])
+		eventMsg, err := client.ParseWebMessage(model.ChatJID, mostRecentMessages[0])
 		if err == nil {
-			lastMessageTrimmed := fmt.Sprintf("%.*s", 35, messageModel.Message)
-			lastMessageText = &lastMessageTrimmed
-			lastMessageTimestamp = &messageModel.Timestamp
+			messageModel, err := models.GetMessageModel(client, model.ChatJID, eventMsg)
+			if err == nil {
+				lastMessageTrimmed := fmt.Sprintf("%.*s", 35, messageModel.Message)
+				lastMessageText = &lastMessageTrimmed
+				lastMessageTimestamp = &messageModel.Timestamp
+			}
 		}
 	}
 
@@ -261,18 +264,14 @@ func (ch *ChatListUiView) handleChatSelected(row *gtk.ListBoxRow) {
 	ch.parent.QueueMessage(ChatView, chat)
 }
 
-func (ch *ChatListUiView) Update(msg *UiMessage) error {
+func (ch *ChatListUiView) Update(msg *UiMessage) (Response, error) {
 	fmt.Println("ChatListUiView.Update: Invoked")
-
-	if msg.Error != nil {
-		return msg.Error
-	}
 
 	client := ch.parent.GetChatClient()
 	if client == nil || !client.IsConnected() {
 		ch.login.SetVisible(true)
 		ch.chatList.SetVisible(false)
-		return nil
+		return msg.Intent, nil
 	}
 	if ch.evtHandle != 0 {
 		ch.Close()
@@ -286,15 +285,15 @@ func (ch *ChatListUiView) Update(msg *UiMessage) error {
 	if !client.IsLoggedIn() {
 		ch.login.SetVisible(true)
 		ch.chatList.SetVisible(false)
-		return nil
+		return msg.Intent, nil
 	}
 
 	fmt.Println("Getting conversations from chat DB...")
 	chatDb := ch.parent.GetChatDB()
 	archived := false
-	conversations, err := chatDb.Conversation.GetRecent(ch.ctx, *client.Store.ID, 30, archived)
+	conversations, err := chatDb.Conversation.GetRecent(ch.ctx, *client.Store.ID, 100, archived)
 	if err != nil {
-		return err
+		return ResponsePushView, err
 	}
 
 	fmt.Printf("Got %s conversations\n", len(conversations))
@@ -303,7 +302,7 @@ func (ch *ChatListUiView) Update(msg *UiMessage) error {
 	for i, convo := range conversations {
 		chatRow, err := NewChatRow(ch.ctx, ch.parent, convo)
 		if err != nil {
-			return err
+			return ResponsePushView, err
 		}
 
 		// By default don't process any selection until a user clicks the item
@@ -324,5 +323,5 @@ func (ch *ChatListUiView) Update(msg *UiMessage) error {
 	}
 
 	fmt.Println("ChatListUiView: Done")
-	return nil
+	return msg.Intent, nil
 }
