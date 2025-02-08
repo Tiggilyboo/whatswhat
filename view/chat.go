@@ -12,7 +12,9 @@ import (
 	"github.com/diamondburned/gotk4/pkg/gtk/v4"
 	"github.com/diamondburned/gotk4/pkg/pango"
 	"github.com/tiggilyboo/whatswhat/view/models"
+	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/proto/waE2E"
+	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
 )
 
@@ -293,7 +295,6 @@ func NewChatView(parent UiParent) *ChatUiView {
 
 	v.composeText = gtk.NewEntry()
 	v.composeText.SetHExpand(true)
-	v.SetSizeRequest(-1, -1)
 	v.composeUi.Append(v.composeText)
 
 	v.send = gtk.NewButtonWithLabel("Send")
@@ -373,6 +374,14 @@ func (ch *ChatUiView) Update(msg *UiMessage) (Response, error) {
 	if client == nil || !client.IsConnected() {
 		return msg.Intent, nil
 	}
+	if ch.cancel != nil {
+		ch.cancel()
+	}
+	ch.ctx, ch.cancel = context.WithTimeout(context.Background(), 2*time.Second)
+
+	// Bind the event handler
+	ch.evtHandle = client.AddEventHandler(ch.chatEventHandler)
+
 	var beforeTime time.Time
 
 	switch t := msg.Payload.(type) {
@@ -387,6 +396,9 @@ func (ch *ChatUiView) Update(msg *UiMessage) (Response, error) {
 
 	case *models.MessageModel:
 		if ch.chat.ChatJID == t.ChatJID {
+			if t.Timestamp.IsZero() {
+				return ResponsePushView, fmt.Errorf("Invalid message timestamp in new message event")
+			}
 			uiRow := NewMessageRowUi(ch.ctx, ch.parent, t, ch.messageLoaded)
 
 			if len(ch.messageRows) == 0 {
@@ -416,7 +428,7 @@ func (ch *ChatUiView) Update(msg *UiMessage) (Response, error) {
 				ch.messageList.Insert(uiRow, insertIdx)
 			}
 
-			return ResponseIgnore, nil
+			return msg.Intent, nil
 		}
 	case *time.Time:
 		// Set the period to load FROM
@@ -427,11 +439,6 @@ func (ch *ChatUiView) Update(msg *UiMessage) (Response, error) {
 	default:
 		return ResponsePushView, fmt.Errorf("Unable to handle message payload: %s", t)
 	}
-
-	ch.ctx, ch.cancel = context.WithTimeout(context.Background(), 2*time.Second)
-
-	// Bind the event handler
-	ch.evtHandle = client.AddEventHandler(ch.chatEventHandler)
 
 	if !client.IsLoggedIn() {
 		return msg.Intent, nil
@@ -499,11 +506,54 @@ func (ch *ChatUiView) binarySearchInsert(message *messageRowUi) int {
 	return low
 }
 
-func (ch *ChatUiView) LoadMessages(startTimestamp *time.Time, endTimestamp *time.Time, limit int) {
+func (ch *ChatUiView) requestHistory(lastModel *models.MessageModel) {
 	if ch.cancel != nil {
 		defer ch.cancel()
 	}
+	client := ch.parent.GetChatClient()
 
+	var lastKnownMsgInfo *types.MessageInfo
+	if lastModel == nil {
+		lastKnownMsgInfo = &types.MessageInfo{
+			MessageSource: types.MessageSource{
+				Chat:     ch.chat.ChatJID.ToNonAD(),
+				IsGroup:  ch.chat.ChatJID.Server == types.GroupServer,
+				IsFromMe: false,
+			},
+			ID:        client.GenerateMessageID(),
+			Timestamp: time.Now(),
+		}
+	} else {
+		fmt.Printf("Requesting history in %s from last message %s", lastModel.ChatJID.String(), lastModel.Timestamp.String())
+		lastKnownMsgInfo = &types.MessageInfo{
+			MessageSource: types.MessageSource{
+				Chat:     lastModel.ChatJID.ToNonAD(),
+				Sender:   lastModel.SenderJID.ToNonAD(),
+				IsGroup:  lastModel.IsGroup,
+				IsFromMe: lastModel.IsFromMe,
+			},
+			ID:        lastModel.ID,
+			Timestamp: lastModel.Timestamp,
+		}
+	}
+	histReq := client.BuildHistorySyncRequest(lastKnownMsgInfo, 30)
+	extraReq := whatsmeow.SendRequestExtra{
+		Peer: true,
+	}
+	histRes, err := client.SendMessage(ch.ctx, ch.chat.ChatJID, histReq, extraReq)
+	if err != nil {
+		ch.parent.QueueMessage(ErrorView, fmt.Errorf("History request failed: %s", err.Error()))
+		return
+	}
+	fmt.Printf("Sent history request: %s\n", histRes.ID)
+}
+
+func (ch *ChatUiView) LoadMessages(startTimestamp *time.Time, endTimestamp *time.Time, limit int) {
+	// Wait and replace the current context
+	if ch.cancel != nil {
+		ch.cancel()
+	}
+	ch.ctx, ch.cancel = context.WithTimeout(context.Background(), 10*time.Second)
 	client := ch.parent.GetChatClient()
 	chatDB := ch.parent.GetChatDB()
 	deviceJID := ch.parent.GetDeviceJID()
@@ -517,7 +567,32 @@ func (ch *ChatUiView) LoadMessages(startTimestamp *time.Time, endTimestamp *time
 		return
 	}
 
-	fmt.Printf("Got %d messages in chat %s for device %s", len(messages), ch.chat.ChatJID, deviceJID)
+	fmt.Printf("Got %d messages in chat %s for device %s\n", len(messages), ch.chat.ChatJID, deviceJID)
+	ch.cancel()
+
+	// Request more history
+	if len(messages) == 0 && len(ch.messageRows) > 0 {
+		// Wait and replace the current context
+		if ch.cancel != nil {
+			ch.cancel()
+		}
+		ch.ctx, ch.cancel = context.WithTimeout(context.Background(), 10*time.Second)
+
+		// Set the message in loading view to go back to ChatView after context completes
+		msg := UiMessage{
+			Identifier: ChatView,
+			Payload:    ch.ctx,
+			Intent:     ResponseBackView,
+		}
+		ch.parent.QueueMessageWithIntent(LoadingView, msg, ResponsePushViewNoWait)
+
+		var lastMessage *models.MessageModel
+		if len(ch.messageRows) > 0 {
+			lastMessage = ch.messageRows[0].message
+		}
+		go ch.requestHistory(lastMessage)
+		return
+	}
 
 	// Convert messages to models
 	msgModels := make([]*models.MessageModel, len(messages))
@@ -547,7 +622,14 @@ func (ch *ChatUiView) LoadMessages(startTimestamp *time.Time, endTimestamp *time
 	lenInsert := len(msgModels)
 
 	for i < lenOrig && j < lenInsert {
-		if ch.messageRows[i].Timestamp().After(msgModels[j].Timestamp) {
+		if msgModels[i] == nil {
+			lenInsert--
+			break
+		}
+		if ch.messageRows[i].Timestamp().Equal(msgModels[j].Timestamp) && ch.messageRows[i].message.ID == msgModels[j].ID {
+			lenInsert--
+			continue
+		} else if ch.messageRows[i].Timestamp().After(msgModels[j].Timestamp) {
 			merged[i+j] = ch.messageRows[i]
 			i++
 		} else {
@@ -563,50 +645,71 @@ func (ch *ChatUiView) LoadMessages(startTimestamp *time.Time, endTimestamp *time
 		i++
 	}
 	for j < lenInsert {
+		if msgModels[j] == nil {
+			break
+		}
 		newRow := NewMessageRowUi(ch.ctx, ch.parent, msgModels[j], ch.messageLoaded)
 		merged[i+j] = newRow
 		j++
 
-		ch.messageList.Prepend(newRow)
+		ch.messageList.Insert(newRow, i+j)
 	}
-	ch.messageRows = merged
+	ch.messageRows = merged[:lenOrig+lenInsert]
+	if ch.cancel != nil {
+		ch.cancel()
+	}
 
 	fmt.Println("ChatUiView.LoadMessages completed")
 }
 
 func (ch *ChatUiView) handleMessageListEdgeOvershot(posType gtk.PositionType) {
-	var newestTimestamp time.Time
-	var oldestTimestamp time.Time
-	if len(ch.messageRows) > 1 {
-		oldestTimestamp = ch.messageRows[0].Timestamp()
-		newestTimestamp = ch.messageRows[len(ch.messageRows)-1].Timestamp()
+	var newestTimestamp *time.Time
+	var oldestTimestamp *time.Time
+	now := time.Now()
+	if len(ch.messageRows) > 0 {
+		for i, msg := range ch.messageRows {
+			fmt.Printf("%d: %s", i, msg.Timestamp())
+		}
+		fmt.Println()
+
+		i := 0
+		oldestTimestamp = &ch.messageRows[0].message.Timestamp
+		for {
+			if !oldestTimestamp.IsZero() || i >= len(ch.messageRows) {
+				break
+			}
+			oldestTimestamp = &ch.messageRows[i].message.Timestamp
+			i++
+		}
+		newestTimestamp = &ch.messageRows[len(ch.messageRows)-1].message.Timestamp
 	} else {
-		newestTimestamp = time.Now()
-		oldestTimestamp = time.Time{}
+		newestTimestamp = &now
+		oldestTimestamp = nil
 	}
 
 	if posType == gtk.PosTop {
 		// Load new messages in history from the oldest loaded message timestamp
 		fmt.Printf("Got request to load older messages before %s\n", oldestTimestamp.String())
 
-		// Wait for any messages we've already tried to load to complete
-		<-ch.ctx.Done()
-
 		// Start a new context to load
+		if ch.cancel != nil {
+			ch.cancel()
+		}
 		ch.ctx, ch.cancel = context.WithTimeout(context.Background(), 3*time.Second)
-		go ch.LoadMessages(nil, &oldestTimestamp, 30)
+
+		go ch.LoadMessages(nil, oldestTimestamp, 30)
 
 	} else if posType == gtk.PosBottom {
 		// Load new messages in history from the newest loaded message timestamp
 		fmt.Printf("Got request to load messages between %s and %s\n", oldestTimestamp.String(), newestTimestamp.String())
 
-		// Wait for any messages we've already tried to load to complete
-		<-ch.ctx.Done()
-
 		// Start a new context to load
+		if ch.cancel != nil {
+			ch.cancel()
+		}
 		ch.ctx, ch.cancel = context.WithTimeout(context.Background(), 3*time.Second)
-		now := time.Now()
-		go ch.LoadMessages(&newestTimestamp, &now, 30)
+
+		go ch.LoadMessages(newestTimestamp, &now, 30)
 	}
 }
 

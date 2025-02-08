@@ -137,24 +137,8 @@ func NewWhatsWhatApp(ctx context.Context, app *gtk.Application) (*WhatsWhatApp, 
 	ww.back = gtk.NewButtonFromIconName("go-previous-symbolic")
 	ww.back.SetTooltipText("Back")
 	ww.back.ConnectClicked(func() {
-		last := ww.ui.history.Pop()
 		current := ww.ui.history.Peek()
-		for {
-			if last == current || current == view.ErrorView || current == view.LoadingView {
-				if ww.ui.history.Len() > 1 {
-					current = ww.ui.history.Pop()
-				} else {
-					break
-				}
-			} else {
-				break
-			}
-		}
-		if current == view.Undefined {
-			current = view.ChatListView
-		}
-		fmt.Printf("Clicked back from: %s to %s (%d left in the stack)\n", last, current, ww.ui.history.Len())
-		ww.QueueMessageWithIntent(current, nil, view.ResponseReplaceView)
+		ww.QueueMessageWithIntent(current, nil, view.ResponseBackView)
 	})
 
 	ww.profile = gtk.NewButtonFromIconName("avatar-default-symbolic")
@@ -230,9 +214,7 @@ func (ww *WhatsWhatApp) getUiView(v view.Message) view.UiView {
 	return member
 }
 
-func (ww *WhatsWhatApp) pushUiView(v view.Message) {
-	fmt.Println("pushUiView: ", v)
-
+func (ww *WhatsWhatApp) waitViewDone() {
 	// Wait while current member is busy
 	current := ww.ui.current
 	if current != nil {
@@ -252,26 +234,23 @@ func (ww *WhatsWhatApp) pushUiView(v view.Message) {
 			}
 		}
 	}
+}
+
+func (ww *WhatsWhatApp) updateCurrentUiView(v view.Message, member view.UiView, changeVisibleChild bool, pushHistory bool, waitDone bool) {
+	if waitDone {
+		ww.waitViewDone()
+	}
 
 	// Loading and message views are special, we pop them as well from history before pushing the next view
 	peeked := ww.ui.history.Peek()
 	for {
-		if peeked == view.LoadingView || peeked == view.ErrorView {
+		if peeked == view.ErrorView {
 			peeked = ww.ui.history.Pop()
 		} else {
 			break
 		}
 	}
 
-	member := ww.getUiView(v)
-	if member == nil {
-		panic(fmt.Errorf("Unrecognized UI view %v, check that it has been subscribed", v))
-	}
-
-	ww.updateCurrentUiView(v, member, true, true)
-}
-
-func (ww *WhatsWhatApp) updateCurrentUiView(v view.Message, member view.UiView, changeVisibleChild bool, pushHistory bool) {
 	ww.ui.current = member
 	if pushHistory {
 		ww.ui.history.Push(v)
@@ -294,6 +273,7 @@ func (ww *WhatsWhatApp) updateCurrentUiView(v view.Message, member view.UiView, 
 func (ww *WhatsWhatApp) consumeMessages() {
 	for msg := range ww.viewChan {
 		fmt.Println("consumeMessages: ", msg)
+
 		member, ok := ww.ui.members[msg.Identifier]
 		if !ok {
 			fmt.Println("consumeMessages: UNHANDLED", msg)
@@ -308,19 +288,42 @@ func (ww *WhatsWhatApp) consumeMessages() {
 				switch response {
 				case view.ResponseIgnore:
 					// Don't do anything with view stack
-					member := ww.getUiView(msg.Identifier)
-					ww.updateCurrentUiView(msg.Identifier, member, false, false)
+					ww.updateCurrentUiView(msg.Identifier, member, false, false, true)
+
+				case view.ResponseBackView:
+					last := ww.ui.history.Pop()
+					current := ww.ui.history.Peek()
+					for {
+						if last == current || current == view.ErrorView {
+							if ww.ui.history.Len() > 1 {
+								current = ww.ui.history.Pop()
+							} else {
+								break
+							}
+						} else {
+							break
+						}
+					}
+					if current == view.Undefined {
+						current = view.ChatListView
+					}
+					member = ww.getUiView(current)
+					ww.updateCurrentUiView(current, member, true, false, true)
+
+					fmt.Printf("Went back from: %s to %s (%d left in the stack)\n", last, current, ww.ui.history.Len())
 
 				case view.ResponseReplaceView:
 					ww.ui.history.Pop()
-					ww.pushUiView(msg.Identifier)
+					member = ww.getUiView(msg.Identifier)
+					ww.updateCurrentUiView(msg.Identifier, member, true, true, true)
 
-				case view.ResponsePushView:
+				case view.ResponsePushView, view.ResponsePushViewNoWait:
+					waitView := response != view.ResponsePushViewNoWait
 					if ww.ui.history.Len() == 0 || ww.ui.history.Peek() != msg.Identifier {
-						ww.pushUiView(msg.Identifier)
+						member = ww.getUiView(msg.Identifier)
+						ww.updateCurrentUiView(msg.Identifier, member, true, true, waitView)
 					} else {
-						member := ww.getUiView(msg.Identifier)
-						ww.updateCurrentUiView(msg.Identifier, member, true, false)
+						ww.updateCurrentUiView(msg.Identifier, member, true, false, waitView)
 					}
 				}
 			})

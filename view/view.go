@@ -23,7 +23,9 @@ type Response uint8
 
 const (
 	ResponsePushView Response = iota
+	ResponsePushViewNoWait
 	ResponseReplaceView
+	ResponseBackView
 	ResponseIgnore
 )
 

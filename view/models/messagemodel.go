@@ -89,6 +89,9 @@ func NewPendingMessage(id types.MessageID, chatJID types.JID, senderJID types.JI
 
 func GetMessageModel(client *whatsmeow.Client, chatJID types.JID, msg *events.Message) (*MessageModel, error) {
 	info := msg.Info
+	if info.Timestamp.IsZero() {
+		return nil, fmt.Errorf("GetMessageModel: timestamp zero")
+	}
 	model := MessageModel{
 		ID:        info.ID,
 		ChatJID:   info.Chat,

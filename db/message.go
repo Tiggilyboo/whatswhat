@@ -111,7 +111,7 @@ func (mq *MessageQuery) GetBetween(ctx context.Context, deviceJID types.JID, cha
 	}
 	query := fmt.Sprintf(getHistorySyncMessagesBetweenQueryTemplate, whereClauses, limitClause)
 
-	fmt.Println("Query: ", query)
+	fmt.Printf("Query: %s\n between %s and %s", query, startTime, endTime)
 
 	return webMessageInfoConverter.
 		NewRowIter(mq.Query(ctx, query, args...)).

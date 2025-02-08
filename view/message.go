@@ -38,9 +38,14 @@ func (m *MessageUiView) Done() <-chan struct{} {
 }
 
 func (m *MessageUiView) Close() {
-	if m.ctx.Done() != nil {
+	if m.cancel != nil {
 		m.cancel()
 	}
+}
+
+func (m *MessageUiView) WaitDoneThenClose(returnTo Message, intent Response) {
+	<-m.Done()
+	m.parent.QueueMessageWithIntent(returnTo, nil, ResponseBackView)
 }
 
 func (m *MessageUiView) Update(msg *UiMessage) (Response, error) {
@@ -49,6 +54,14 @@ func (m *MessageUiView) Update(msg *UiMessage) (Response, error) {
 	switch payload := msg.Payload.(type) {
 	case error:
 		m.message.SetLabel(payload.Error())
+	case *UiMessage:
+		m.message.SetLabel("Loading...")
+
+		// Wait for context to complete then go to passed view
+		payloadContext := payload.Payload.(context.Context)
+		m.ctx, m.cancel = context.WithCancel(payloadContext)
+		go m.WaitDoneThenClose(payload.Identifier, payload.Intent)
+
 	default:
 		m.message.SetLabel(fmt.Sprint(msg.Payload))
 	}
