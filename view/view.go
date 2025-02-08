@@ -11,7 +11,6 @@ type Message uint8
 
 const (
 	Undefined Message = iota
-	Close
 	LoadingView
 	ErrorView
 	QrView
@@ -24,6 +23,7 @@ type Response uint8
 
 const (
 	ResponsePushView Response = iota
+	ResponseReplaceView
 	ResponseIgnore
 )
 
@@ -48,4 +48,5 @@ type UiParent interface {
 	GetChatDB() *db.Database
 	GetContacts() (map[types.JID]types.ContactInfo, error)
 	GetDeviceJID() *types.JID
+	GetWindowSize() (int, int)
 }

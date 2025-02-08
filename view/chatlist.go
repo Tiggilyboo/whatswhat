@@ -229,12 +229,9 @@ func (ch *ChatListUiView) Close() {
 	if ch.evtHandle != 0 && chat != nil {
 		chat.RemoveEventHandler(ch.evtHandle)
 	}
-	if ch.ctx.Done() != nil {
+	if ch.cancel != nil {
 		ch.cancel()
 	}
-	ch.contacts = nil
-	ch.chats = nil
-	ch.chatList.RemoveAll()
 	ch.chatList.SetVisible(false)
 	ch.login.SetVisible(true)
 }
@@ -267,20 +264,37 @@ func (ch *ChatListUiView) handleChatSelected(row *gtk.ListBoxRow) {
 func (ch *ChatListUiView) Update(msg *UiMessage) (Response, error) {
 	fmt.Println("ChatListUiView.Update: Invoked")
 
+	// Clear any old state
+	initialize := false
+	if msg.Intent == ResponsePushView {
+		ch.contacts = nil
+		ch.chats = nil
+		ch.chatList.RemoveAll()
+		initialize = true
+	}
+
 	client := ch.parent.GetChatClient()
 	if client == nil || !client.IsConnected() {
 		ch.login.SetVisible(true)
 		ch.chatList.SetVisible(false)
 		return msg.Intent, nil
 	}
-	if ch.evtHandle != 0 {
-		ch.Close()
+
+	if initialize {
+		if ch.cancel != nil {
+			ch.cancel()
+		}
+		if ch.evtHandle != 0 {
+			ch.Close()
+		}
 	}
 	ch.ctx, ch.cancel = context.WithDeadline(context.Background(), time.Now().Add(2*time.Second))
 	defer ch.cancel()
 
-	// Bind the event handler
-	ch.evtHandle = client.AddEventHandler(ch.chatEventHandler)
+	if initialize || ch.evtHandle == 0 {
+		// Bind the event handler
+		ch.evtHandle = client.AddEventHandler(ch.chatEventHandler)
+	}
 
 	if !client.IsLoggedIn() {
 		ch.login.SetVisible(true)
@@ -288,39 +302,41 @@ func (ch *ChatListUiView) Update(msg *UiMessage) (Response, error) {
 		return msg.Intent, nil
 	}
 
-	fmt.Println("Getting conversations from chat DB...")
-	chatDb := ch.parent.GetChatDB()
-	archived := false
-	conversations, err := chatDb.Conversation.GetRecent(ch.ctx, *client.Store.ID, 100, archived)
-	if err != nil {
-		return ResponsePushView, err
-	}
-
-	fmt.Printf("Got %s conversations\n", len(conversations))
-
-	chats := make([]*chatItemRow, len(conversations))
-	for i, convo := range conversations {
-		chatRow, err := NewChatRow(ch.ctx, ch.parent, convo)
+	if initialize {
+		fmt.Println("Getting conversations from chat DB...")
+		chatDb := ch.parent.GetChatDB()
+		archived := false
+		conversations, err := chatDb.Conversation.GetRecent(ch.ctx, *client.Store.ID, 100, archived)
 		if err != nil {
 			return ResponsePushView, err
 		}
 
-		// By default don't process any selection until a user clicks the item
-		chatRow.SetSelectable(false)
+		fmt.Printf("Got %s conversations\n", len(conversations))
 
-		fmt.Printf("Appending %s into row index: %d\n", chatRow.chat.Name, i)
-		ch.chatList.Append(chatRow)
-		chats[i] = chatRow
+		chats := make([]*chatItemRow, len(conversations))
+		for i, convo := range conversations {
+			chatRow, err := NewChatRow(ch.ctx, ch.parent, convo)
+			if err != nil {
+				return ResponsePushView, err
+			}
+
+			// By default don't process any selection until a user clicks the item
+			chatRow.SetSelectable(false)
+
+			fmt.Printf("Appending %s into row index: %d\n", chatRow.chat.Name, i)
+			ch.chatList.Append(chatRow)
+			chats[i] = chatRow
+		}
+		ch.chats = chats
+
+		// Allow any selections
+		ch.chatList.UnselectAll()
+		for i, _ := range conversations {
+			ch.chats[i].SetSelectable(true)
+		}
 	}
-	ch.chats = chats
 	ch.chatList.SetVisible(true)
 	ch.login.SetVisible(false)
-
-	// Allow any selections
-	ch.chatList.UnselectAll()
-	for i, _ := range conversations {
-		ch.chats[i].SetSelectable(true)
-	}
 
 	fmt.Println("ChatListUiView: Done")
 	return msg.Intent, nil

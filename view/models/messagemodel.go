@@ -99,6 +99,9 @@ func GetMessageModel(client *whatsmeow.Client, chatJID types.JID, msg *events.Me
 		Timestamp: info.Timestamp,
 		MsgType:   MessageTypeUnknown,
 	}
+	if client.Store.ID.User == info.Sender.User {
+		model.PushName = "Me"
+	}
 
 	emsg := msg.Message
 	switch {

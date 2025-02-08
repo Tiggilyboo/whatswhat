@@ -79,6 +79,12 @@ func (s *ViewStack) Peek() view.Message {
 	return s.history[l-1]
 }
 
+func (s *ViewStack) Clear() {
+	s.lock.Lock()
+	defer s.lock.Unlock()
+	s.history = []view.Message{}
+}
+
 type WhatsWhatApp struct {
 	*gtk.Application
 	window   *gtk.ApplicationWindow
@@ -134,7 +140,7 @@ func NewWhatsWhatApp(ctx context.Context, app *gtk.Application) (*WhatsWhatApp, 
 		last := ww.ui.history.Pop()
 		current := ww.ui.history.Peek()
 		for {
-			if last == current {
+			if last == current || current == view.ErrorView || current == view.LoadingView {
 				if ww.ui.history.Len() > 1 {
 					current = ww.ui.history.Pop()
 				} else {
@@ -144,8 +150,11 @@ func NewWhatsWhatApp(ctx context.Context, app *gtk.Application) (*WhatsWhatApp, 
 				break
 			}
 		}
+		if current == view.Undefined {
+			current = view.ChatListView
+		}
 		fmt.Printf("Clicked back from: %s to %s (%d left in the stack)\n", last, current, ww.ui.history.Len())
-		ww.pushUiView(current)
+		ww.QueueMessageWithIntent(current, nil, view.ResponseReplaceView)
 	})
 
 	ww.profile = gtk.NewButtonFromIconName("avatar-default-symbolic")
@@ -186,6 +195,12 @@ func (ww *WhatsWhatApp) GetDeviceJID() *types.JID {
 	return ww.client.Store.ID
 }
 
+func (ww *WhatsWhatApp) GetWindowSize() (int, int) {
+	width := ww.window.Size(gtk.OrientationHorizontal)
+	height := ww.window.Size(gtk.OrientationVertical)
+	return width, height
+}
+
 func (ww *WhatsWhatApp) GetContacts() (map[types.JID]types.ContactInfo, error) {
 	if ww.contacts != nil {
 		return ww.contacts, nil
@@ -207,13 +222,16 @@ func (ww *WhatsWhatApp) subscribeUiView(ident view.Message, ui view.UiView) {
 	ww.ui.AddChild(ui)
 }
 
-func (ww *WhatsWhatApp) pushUiView(v view.Message) {
-	fmt.Println("pushUiView: ", v)
-
+func (ww *WhatsWhatApp) getUiView(v view.Message) view.UiView {
 	member, ok := ww.ui.members[v]
 	if !ok {
-		panic(fmt.Sprintf("Unknown UI view: %s", v))
+		return nil
 	}
+	return member
+}
+
+func (ww *WhatsWhatApp) pushUiView(v view.Message) {
+	fmt.Println("pushUiView: ", v)
 
 	// Wait while current member is busy
 	current := ww.ui.current
@@ -234,7 +252,6 @@ func (ww *WhatsWhatApp) pushUiView(v view.Message) {
 			}
 		}
 	}
-	ww.ui.current = member
 
 	// Loading and message views are special, we pop them as well from history before pushing the next view
 	peeked := ww.ui.history.Peek()
@@ -246,18 +263,31 @@ func (ww *WhatsWhatApp) pushUiView(v view.Message) {
 		}
 	}
 
-	glib.IdleAdd(func() {
-		title := member.Title()
-		ww.window.SetTitle(title)
+	member := ww.getUiView(v)
+	if member == nil {
+		panic(fmt.Errorf("Unrecognized UI view %v, check that it has been subscribed", v))
+	}
 
-		ww.ui.SetVisibleChild(member)
+	ww.updateCurrentUiView(v, member, true, true)
+}
+
+func (ww *WhatsWhatApp) updateCurrentUiView(v view.Message, member view.UiView, changeVisibleChild bool, pushHistory bool) {
+	ww.ui.current = member
+	if pushHistory {
+		ww.ui.history.Push(v)
+	}
+
+	glib.IdleAdd(func() {
+		ww.window.SetTitle(member.Title())
 
 		if ww.ui.history.Len() <= 1 {
 			ww.back.SetVisible(false)
 		} else {
 			ww.back.SetVisible(true)
 		}
-		ww.ui.history.Push(v)
+		if changeVisibleChild {
+			ww.ui.SetVisibleChild(member)
+		}
 	})
 }
 
@@ -275,9 +305,23 @@ func (ww *WhatsWhatApp) consumeMessages() {
 					ww.QueueMessage(view.ErrorView, err)
 					return
 				}
+				switch response {
+				case view.ResponseIgnore:
+					// Don't do anything with view stack
+					member := ww.getUiView(msg.Identifier)
+					ww.updateCurrentUiView(msg.Identifier, member, false, false)
 
-				if response == view.ResponsePushView && ww.ui.history.Peek() != msg.Identifier {
+				case view.ResponseReplaceView:
+					ww.ui.history.Pop()
 					ww.pushUiView(msg.Identifier)
+
+				case view.ResponsePushView:
+					if ww.ui.history.Len() == 0 || ww.ui.history.Peek() != msg.Identifier {
+						ww.pushUiView(msg.Identifier)
+					} else {
+						member := ww.getUiView(msg.Identifier)
+						ww.updateCurrentUiView(msg.Identifier, member, true, false)
+					}
 				}
 			})
 		}
@@ -411,6 +455,32 @@ func (ww *WhatsWhatApp) handleMessage(evt *events.Message) {
 	// TODO: Added to DB, now update the chat UI
 }
 
+func (ww *WhatsWhatApp) handleLoggedOut(evt *events.LoggedOut) {
+
+	ww.ui.history.Clear()
+	ww.QueueMessage(view.ChatListView, nil)
+
+	deviceJID := ww.GetDeviceJID()
+
+	// Try to connect again?
+	if evt.OnConnect && !ww.client.IsConnected() {
+		err := ww.client.Connect()
+		if err != nil {
+			ww.QueueMessage(view.QrView, fmt.Errorf("Unable to reconnect: %s", err.Error()))
+			return
+		}
+	}
+
+	// Delete session data?
+	if evt.Reason.IsLoggedOut() {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		go ww.chatDB.Conversation.DeleteAll(ctx, *deviceJID)
+	}
+
+	ww.QueueMessage(view.LoadingView, evt.Reason.String())
+}
+
 func (ww *WhatsWhatApp) handleHistorySync(evt *events.HistorySync) {
 	if ww.chatDB == nil {
 		ww.QueueMessage(view.ErrorView, fmt.Errorf("Chat database not initialized, cannot load chat history"))
@@ -420,9 +490,12 @@ func (ww *WhatsWhatApp) handleHistorySync(evt *events.HistorySync) {
 		ww.QueueMessage(view.ErrorView, fmt.Errorf("Unable to handle history sync, logged in!"))
 		return
 	}
-	// TODO: Set UI TO LOAD HISTORY
+	ww.QueueMessage(view.LoadingView, "Loading chat history...")
 
 	ctx, cancel := context.WithCancel(context.Background())
+	context.AfterFunc(ctx, func() {
+		ww.QueueMessageWithIntent(view.ChatListView, nil, view.ResponseReplaceView)
+	})
 	defer cancel()
 
 	failedToSaveConversations := 0
@@ -523,6 +596,8 @@ func (ww *WhatsWhatApp) handleCommonEvents(evt interface{}) {
 		ww.handleHistorySync(v)
 	case *events.Message:
 		ww.handleMessage(v)
+	case *events.LoggedOut:
+		ww.handleLoggedOut(v)
 	}
 }
 
