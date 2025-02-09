@@ -39,6 +39,7 @@ type MessageModel struct {
 	MsgType     MessageType
 	Message     string
 	FileName    string
+	Unread      bool
 	ContextInfo *waE2E.ContextInfo
 }
 
@@ -75,14 +76,17 @@ type MediaMessageWithDuration interface {
 	GetSeconds() uint32
 }
 
-func NewPendingMessage(id types.MessageID, chatJID types.JID, senderJID types.JID, pushName string, message string) MessageModel {
+func NewPendingMessage(id types.MessageID, chatJID types.JID, senderJID types.JID, pushName string, message string, msgType MessageType, media MediaMessage) MessageModel {
 	return MessageModel{
 		ID:        id,
 		ChatJID:   chatJID,
 		SenderJID: senderJID,
 		PushName:  pushName,
 		Message:   message,
+		MsgType:   msgType,
+		Media:     media,
 		Timestamp: time.Now(),
+		IsGroup:   chatJID.Server == types.GroupServer,
 		IsFromMe:  true,
 	}
 }
@@ -107,10 +111,14 @@ func GetMessageModel(client *whatsmeow.Client, chatJID types.JID, msg *events.Me
 	}
 
 	emsg := msg.Message
+	if emsg == nil {
+		emsg = msg.SourceWebMsg.GetMessage()
+	}
 	switch {
 	case emsg == nil:
 		model.MsgType = MessageTypeText
 		model.Message = "Unable to parse message"
+		fmt.Printf("nil message: %v", msg)
 
 	case emsg.Conversation != nil, msg.Message.ExtendedTextMessage != nil:
 		model.MsgType = MessageTypeText
@@ -200,9 +208,9 @@ func (mm *MessageModel) convertMediaMessage(rawMsg MediaMessage) {
 	}
 	if captionMsg, ok := rawMsg.(MediaMessageWithCaption); ok && len(captionMsg.GetCaption()) > 0 {
 		mm.Message = captionMsg.GetCaption()
-	} else if len(mm.FileName) > 0 {
-		mm.Message = mm.FileName
-	} else {
+	} else if durationMsg, ok := rawMsg.(MediaMessageWithDuration); ok {
+		mm.Message = fmt.Sprintf("Audio Message %d sec", durationMsg.GetSeconds())
+	} else if mm.MsgType == MessageTypeUnknown {
 		mm.Message = "Unsupported media type"
 	}
 }
@@ -218,9 +226,12 @@ func (mm *MessageModel) convertRawTextToMarkup(msg *waE2E.Message) {
 	}
 	mm.ContextInfo = msg.GetExtendedTextMessage().GetContextInfo()
 
+	fmt.Printf("Converting raw text to markup: %s", mm.Message)
+
 	// Replace links with html
 	mm.Message = inlineURLRegex.ReplaceAllStringFunc(mm.Message, func(s string) string {
 		groups := inlineURLRegex.FindStringSubmatch(s)
 		return fmt.Sprintf(`<a href="%s">%s</a>`, groups[2], groups[1])
 	})
+	fmt.Printf(" to: %s\n", mm.Message)
 }

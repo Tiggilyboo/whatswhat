@@ -14,7 +14,6 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
-	"sync"
 
 	_ "github.com/mattn/go-sqlite3"
 
@@ -33,64 +32,13 @@ import (
 	"github.com/diamondburned/gotk4/pkg/gtk/v4"
 )
 
-type ViewStack struct {
-	lock    sync.Mutex
-	history []view.Message
-}
-
-func NewViewStack() *ViewStack {
-	return &ViewStack{
-		lock:    sync.Mutex{},
-		history: []view.Message{},
-	}
-}
-
-func (s *ViewStack) Push(v view.Message) {
-	s.lock.Lock()
-	defer s.lock.Unlock()
-
-	s.history = append(s.history, v)
-}
-
-func (s *ViewStack) Len() int {
-	return len(s.history)
-}
-
-func (s *ViewStack) Pop() view.Message {
-	s.lock.Lock()
-	defer s.lock.Unlock()
-
-	l := len(s.history)
-	if l == 0 {
-		return view.Undefined
-	}
-
-	v := s.history[l-1]
-	s.history = s.history[:l-1]
-	return v
-}
-
-func (s *ViewStack) Peek() view.Message {
-	l := len(s.history)
-	if l == 0 {
-		return view.Undefined
-	}
-
-	return s.history[l-1]
-}
-
-func (s *ViewStack) Clear() {
-	s.lock.Lock()
-	defer s.lock.Unlock()
-	s.history = []view.Message{}
-}
-
 type WhatsWhatApp struct {
 	*gtk.Application
 	window   *gtk.ApplicationWindow
 	header   *gtk.HeaderBar
 	back     *gtk.Button
 	profile  *gtk.Button
+	overlay  *gtk.Overlay
 	client   *whatsmeow.Client
 	chatDB   *db.Database
 	notifier *services.NotificationService
@@ -100,9 +48,10 @@ type WhatsWhatApp struct {
 
 	ui struct {
 		*gtk.Stack
-		history *ViewStack
+		history *view.ViewStack
 		members map[view.Message]view.UiView
 		current view.UiView
+		overlay view.UiView
 	}
 }
 
@@ -120,8 +69,7 @@ func NewWhatsWhatApp(ctx context.Context, app *gtk.Application) (*WhatsWhatApp, 
 
 	ww.viewChan = make(chan view.UiMessage, 10)
 	ww.ui.Stack = gtk.NewStack()
-
-	ww.ui.history = NewViewStack()
+	ww.ui.history = view.NewViewStack()
 	ww.ui.SetTransitionType(gtk.StackTransitionTypeSlideLeftRight)
 	ww.ui.members = make(map[view.Message]view.UiView)
 
@@ -133,6 +81,11 @@ func NewWhatsWhatApp(ctx context.Context, app *gtk.Application) (*WhatsWhatApp, 
 	msgView := view.NewMessageView(&ww)
 	ww.subscribeUiView(view.ErrorView, msgView)
 	ww.subscribeUiView(view.LoadingView, msgView)
+
+	ww.overlay = gtk.NewOverlay()
+	ww.overlay.SetHAlign(gtk.AlignCenter)
+	ww.overlay.SetVAlign(gtk.AlignCenter)
+	ww.overlay.SetVisible(false)
 
 	ww.back = gtk.NewButtonFromIconName("go-previous-symbolic")
 	ww.back.SetTooltipText("Back")
@@ -162,6 +115,22 @@ func NewWhatsWhatApp(ctx context.Context, app *gtk.Application) (*WhatsWhatApp, 
 	ww.back.SetVisible(false)
 
 	return &ww, nil
+}
+
+func (ww *WhatsWhatApp) QueueMessageWithIntent(id view.Message, payload interface{}, intent view.Response) {
+	ww.viewChan <- view.UiMessage{
+		Identifier: id,
+		Payload:    payload,
+		Intent:     intent,
+	}
+}
+
+func (ww *WhatsWhatApp) QueueOverlayMessage(id view.Message, payload interface{}) {
+	ww.QueueMessageWithIntent(id, payload, view.ResponseOverlay)
+}
+
+func (ww *WhatsWhatApp) QueueMessage(id view.Message, payload interface{}) {
+	ww.QueueMessageWithIntent(id, payload, view.ResponsePushView)
 }
 
 func (ww *WhatsWhatApp) GetChatClient() *whatsmeow.Client {
@@ -214,31 +183,41 @@ func (ww *WhatsWhatApp) getUiView(v view.Message) view.UiView {
 	return member
 }
 
-func (ww *WhatsWhatApp) waitViewDone() {
+func (ww *WhatsWhatApp) waitViewDone(v view.UiView) {
 	// Wait while current member is busy
-	current := ww.ui.current
-	if current != nil {
-		waitTimeout, cancel := context.WithDeadline(context.Background(), time.Now().Add(3*time.Second))
-		defer cancel()
+	if v == nil {
+		return
+	}
+	waitTimeout, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
 
-	ready:
-		for {
-			select {
-			case <-current.Done():
-				fmt.Print("Current UI view done")
-				break ready
-			case <-waitTimeout.Done():
-				fmt.Print("Closing current UI view from timeout")
-				current.Close()
-				break ready
-			}
+ready:
+	for {
+		select {
+		case <-v.Done():
+			fmt.Printf("UI view done\n")
+			break ready
+		case <-waitTimeout.Done():
+			fmt.Print("Closing current UI view from timeout")
+			v.Close()
+			break ready
 		}
 	}
 }
 
+func (ww *WhatsWhatApp) updateOverlayUiView(v view.Message, member view.UiView, waitDone bool) {
+	// Wait for any other overlays to complete
+	ww.waitViewDone(ww.ui.overlay)
+
+	ww.overlay.SetChild(member)
+
+	ww.ui.overlay = member
+}
+
 func (ww *WhatsWhatApp) updateCurrentUiView(v view.Message, member view.UiView, changeVisibleChild bool, pushHistory bool, waitDone bool) {
 	if waitDone {
-		ww.waitViewDone()
+		//ww.waitViewDone(ww.ui.overlay)
+		ww.waitViewDone(ww.ui.current)
 	}
 
 	// Loading and message views are special, we pop them as well from history before pushing the next view
@@ -293,17 +272,6 @@ func (ww *WhatsWhatApp) consumeMessages() {
 				case view.ResponseBackView:
 					last := ww.ui.history.Pop()
 					current := ww.ui.history.Peek()
-					for {
-						if last == current || current == view.ErrorView {
-							if ww.ui.history.Len() > 1 {
-								current = ww.ui.history.Pop()
-							} else {
-								break
-							}
-						} else {
-							break
-						}
-					}
 					if current == view.Undefined {
 						current = view.ChatListView
 					}
@@ -313,33 +281,26 @@ func (ww *WhatsWhatApp) consumeMessages() {
 					fmt.Printf("Went back from: %s to %s (%d left in the stack)\n", last, current, ww.ui.history.Len())
 
 				case view.ResponseReplaceView:
-					ww.ui.history.Pop()
+					last := ww.ui.history.Pop()
 					member = ww.getUiView(msg.Identifier)
 					ww.updateCurrentUiView(msg.Identifier, member, true, true, true)
+					fmt.Printf("Replaced view from %v to %v", last, msg.Identifier)
 
-				case view.ResponsePushView, view.ResponsePushViewNoWait:
-					waitView := response != view.ResponsePushViewNoWait
+				case view.ResponsePushView:
 					if ww.ui.history.Len() == 0 || ww.ui.history.Peek() != msg.Identifier {
 						member = ww.getUiView(msg.Identifier)
-						ww.updateCurrentUiView(msg.Identifier, member, true, true, waitView)
+						ww.updateCurrentUiView(msg.Identifier, member, true, true, true)
 					} else {
-						ww.updateCurrentUiView(msg.Identifier, member, true, false, waitView)
+						ww.updateCurrentUiView(msg.Identifier, member, true, false, true)
 					}
+
+				case view.ResponseOverlay:
+					member = ww.getUiView(msg.Identifier)
+					ww.updateOverlayUiView(msg.Identifier, member, true)
 				}
 			})
 		}
 	}
-}
-
-func (ww *WhatsWhatApp) QueueMessageWithIntent(id view.Message, payload interface{}, intent view.Response) {
-	ww.viewChan <- view.UiMessage{
-		Identifier: id,
-		Payload:    payload,
-		Intent:     intent,
-	}
-}
-func (ww *WhatsWhatApp) QueueMessage(id view.Message, payload interface{}) {
-	ww.QueueMessageWithIntent(id, payload, view.ResponsePushView)
 }
 
 func (ww *WhatsWhatApp) handleConnectedState(connected bool) {
@@ -436,6 +397,9 @@ func (ww *WhatsWhatApp) handleMessage(evt *events.Message) {
 	}
 	//message :=
 	messages := make([]*wwdb.HistorySyncMessageTuple, 1)
+
+	fmt.Printf("Message: %v", evt.UnwrapRaw())
+
 	marshaled, err := proto.Marshal(evt.Message)
 	if err != nil {
 		ww.QueueMessage(view.ErrorView, fmt.Errorf("Unable to marshal new message: %s", err.Error()))
@@ -640,6 +604,9 @@ func (ww *WhatsWhatApp) Initialize(ctx context.Context) error {
 	fmt.Println("Creating new whatsapp client")
 	ww.client = whatsmeow.NewClient(deviceStore, clientLog)
 	ww.client.AddEventHandler(ww.handleCommonEvents)
+
+	ww.client.EnableAutoReconnect = true
+	ww.client.AutoTrustIdentity = true
 
 	// New login?
 	if ww.client.Store.ID == nil {

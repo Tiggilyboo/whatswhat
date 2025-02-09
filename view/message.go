@@ -17,6 +17,8 @@ type MessageUiView struct {
 
 func NewMessageView(parent UiParent) *MessageUiView {
 	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
 	v := MessageUiView{
 		ctx:     ctx,
 		cancel:  cancel,
@@ -62,7 +64,11 @@ func (m *MessageUiView) Update(msg *UiMessage) (Response, error) {
 		m.ctx, m.cancel = context.WithCancel(payloadContext)
 		go m.WaitDoneThenClose(payload.Identifier, payload.Intent)
 
+	case nil:
+		m.message.SetLabel("Loading...")
+
 	default:
+		fmt.Printf("Assuming message payload is string: %v\n", payload)
 		m.message.SetLabel(fmt.Sprint(msg.Payload))
 	}
 
