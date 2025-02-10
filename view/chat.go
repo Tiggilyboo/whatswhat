@@ -13,7 +13,6 @@ import (
 	"github.com/diamondburned/gotk4/pkg/gtk/v4"
 	"github.com/diamondburned/gotk4/pkg/pango"
 	"github.com/tiggilyboo/whatswhat/view/models"
-	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/appstate"
 	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/proto/waSyncAction"
@@ -21,6 +20,94 @@ import (
 	"go.mau.fi/whatsmeow/types/events"
 	"google.golang.org/protobuf/proto"
 )
+
+type statusRowUi struct {
+	*gtk.ListBoxRow
+	parent    UiParent
+	ui        *gtk.Box
+	spinner   *gtk.Spinner
+	separator *gtk.Separator
+	button    *gtk.Button
+	status    *gtk.Label
+	feedback  chan interface{}
+	ctx       context.Context
+	cancel    context.CancelFunc
+}
+
+func NewStatusRowUi(parent UiParent, buttonLabel string, initialStatus string) *statusRowUi {
+	ui := gtk.NewBox(gtk.OrientationVertical, 0)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	rowUi := statusRowUi{
+		ListBoxRow: gtk.NewListBoxRow(),
+		spinner:    gtk.NewSpinner(),
+		separator:  gtk.NewSeparator(gtk.OrientationHorizontal),
+		button:     gtk.NewButtonWithLabel(buttonLabel),
+		status:     gtk.NewLabel(initialStatus),
+		feedback:   make(chan interface{}),
+		ctx:        ctx,
+		cancel:     cancel,
+	}
+
+	rowUi.spinner.SetVisible(false)
+	rowUi.spinner.SetHAlign(gtk.AlignCenter)
+	rowUi.spinner.SetVAlign(gtk.AlignCenter)
+
+	rowUi.status.SetVisible(false)
+	rowUi.status.SetHAlign(gtk.AlignCenter)
+	rowUi.status.SetVAlign(gtk.AlignCenter)
+
+	rowUi.button.SetVisible(false)
+	rowUi.button.SetHExpand(true)
+
+	ui.SetHExpand(true)
+	ui.SetVExpand(true)
+	ui.Append(rowUi.spinner)
+	ui.Append(rowUi.button)
+	ui.Append(rowUi.separator)
+
+	rowUi.ListBoxRow.SetChild(ui)
+
+	go rowUi.consumeFeedback()
+
+	return &rowUi
+}
+
+func (sr *statusRowUi) SetLoading(status string) {
+	sr.button.SetVisible(false)
+	sr.spinner.SetVisible(true)
+	sr.status.SetLabel(status)
+	sr.status.SetVisible(true)
+}
+
+func (sr *statusRowUi) SetLoaded() {
+	sr.button.SetVisible(true)
+	sr.spinner.SetVisible(false)
+	sr.status.SetVisible(false)
+}
+
+func (sr *statusRowUi) SetStatus(status string) {
+	sr.button.SetVisible(false)
+	sr.spinner.SetVisible(false)
+	sr.status.SetVisible(true)
+	sr.status.SetLabel(status)
+}
+
+func (sr *statusRowUi) consumeFeedback() {
+	for feedback := range sr.feedback {
+		defer sr.cancel()
+
+		switch v := feedback.(type) {
+		case error:
+			sr.SetStatus(v.Error())
+		case string:
+			sr.SetStatus(v)
+		case nil:
+			sr.SetLoaded()
+		}
+	}
+}
 
 type messageRowUi struct {
 	*gtk.ListBoxRow
@@ -256,13 +343,14 @@ type ChatUiView struct {
 	composeText         *gtk.Entry
 	send                *gtk.Button
 	messageList         *gtk.ListBox
+	statusRow           *statusRowUi
 	messageRows         []*messageRowUi
 	chat                *models.ConversationModel
 	messagePending      *messageRowUi
-	customScrolled      bool
 	customScrollMessage *messageRowUi
-	messageLoaded       chan int
+	customScrolled      bool
 	closed              bool
+	messageLoaded       chan int
 	lock                sync.RWMutex
 	ctx                 context.Context
 	cancel              context.CancelFunc
@@ -288,6 +376,12 @@ func NewChatView(parent UiParent) *ChatUiView {
 	v.messageList.SetSelectionMode(gtk.SelectionNone)
 	v.messageList.SetVExpand(true)
 	v.messageList.SetHExpand(true)
+
+	v.statusRow = NewStatusRowUi(parent, "Load more", "")
+	v.statusRow.SetLoaded()
+	v.statusRow.button.ConnectClicked(v.loadMoreHistory)
+
+	v.messageList.Append(v.statusRow)
 
 	v.viewport = gtk.NewViewport(nil, v.messageList.Adjustment())
 	v.viewport.SetChild(v.messageList)
@@ -532,6 +626,7 @@ func (ch *ChatUiView) Update(msg *UiMessage) (Response, error) {
 
 func (ch *ChatUiView) ClearMessages(startTimestamp *time.Time, endTimestamp *time.Time) {
 	ch.lock.Lock()
+	defer ch.messageList.Insert(ch.statusRow, 0)
 	defer ch.lock.Unlock()
 
 	if startTimestamp == nil && endTimestamp == nil {
@@ -592,32 +687,6 @@ func (ch *ChatUiView) binarySearchInsert(message *messageRowUi) int {
 	return low
 }
 
-func (ch *ChatUiView) requestHistory(count int) {
-	if ch.closed {
-		return
-	}
-	client := ch.parent.GetChatClient()
-	lastKnownMsgInfo := &types.MessageInfo{
-		MessageSource: types.MessageSource{
-			Chat:     ch.chat.ChatJID,
-			IsGroup:  ch.chat.ChatJID.Server == types.GroupServer,
-			IsFromMe: false,
-		},
-		ID:        client.GenerateMessageID(),
-		Timestamp: time.Now(),
-	}
-	histReq := client.BuildHistorySyncRequest(lastKnownMsgInfo, count)
-	extraReq := whatsmeow.SendRequestExtra{
-		Peer: true,
-	}
-	histRes, err := client.SendMessage(ch.ctx, ch.chat.ChatJID, histReq, extraReq)
-	if err != nil {
-		ch.parent.QueueMessageWithIntent(ErrorView, fmt.Errorf("History request failed: %s", err), ResponseOverlay)
-		return
-	}
-	fmt.Printf("Sent history request: %s\n", histRes.ID)
-}
-
 func (ch *ChatUiView) LoadOlderMessages(limit int) {
 	oldest, _ := ch.getMessageTimestampRange()
 	go ch.LoadMessages(nil, &oldest, limit)
@@ -652,7 +721,7 @@ func (ch *ChatUiView) LoadMessages(startTimestamp *time.Time, endTimestamp *time
 	// Request more history
 	if lenMessages == 0 && lenOrig > 0 {
 		fmt.Printf("No messages, loading more from history")
-		go ch.requestHistory(30)
+		go ch.loadMoreHistory()
 		return
 	}
 
@@ -779,6 +848,26 @@ func (ch *ChatUiView) getMessageTimestampRange() (time.Time, time.Time) {
 	ch.lock.RUnlock()
 
 	return oldestTimestamp, newestTimestamp
+}
+
+func (ch *ChatUiView) loadMoreHistory() {
+	ch.lock.Lock()
+	ch.statusRow.cancel()
+	ch.statusRow.ctx, ch.statusRow.cancel = context.WithTimeout(ch.statusRow.ctx, 2*time.Second)
+	ch.statusRow.SetLoading("Requesting for more messages...")
+	ch.lock.Unlock()
+
+	go ch.parent.RequestHistory(ch.chat.ChatJID, 30, ch.statusRow.ctx, ch.statusRow.cancel, ch.handleHistoryRequestFeedback)
+}
+
+func (ch *ChatUiView) handleHistoryRequestFeedback(err error) {
+	ch.lock.Lock()
+	if err == nil {
+		ch.statusRow.SetLoaded()
+	} else {
+		ch.statusRow.SetStatus(err.Error())
+	}
+	defer ch.lock.Unlock()
 }
 
 func (ch *ChatUiView) handleMessageListEdgeOvershot(posType gtk.PositionType) {

@@ -167,6 +167,33 @@ func (ww *WhatsWhatApp) GetContacts() (map[types.JID]types.ContactInfo, error) {
 	return contacts, nil
 }
 
+func (ww *WhatsWhatApp) RequestHistory(chatJID types.JID, count int, ctx context.Context, cancel context.CancelFunc, feedback func(error)) {
+	defer cancel()
+
+	fmt.Printf("Building history request: %s for %d messages\n", chatJID, count)
+	client := ww.GetChatClient()
+	lastKnownMsgInfo := &types.MessageInfo{
+		MessageSource: types.MessageSource{
+			Chat:     chatJID,
+			IsGroup:  chatJID.Server == types.GroupServer,
+			IsFromMe: false,
+		},
+		ID:        client.GenerateMessageID(),
+		Timestamp: time.Now(),
+	}
+	histReq := client.BuildHistorySyncRequest(lastKnownMsgInfo, count)
+	extraReq := whatsmeow.SendRequestExtra{
+		Peer: true,
+	}
+	histRes, err := client.SendMessage(ctx, chatJID, histReq, extraReq)
+	if err != nil {
+		feedback(err)
+	}
+
+	fmt.Printf("Sent history request: %s\n", histRes.ID)
+	feedback(nil)
+}
+
 func (ww *WhatsWhatApp) subscribeUiView(ident view.Message, ui view.UiView) {
 	if _, exists := ww.ui.members[ident]; exists {
 		panic(fmt.Sprint("Already subscribed UI: ", ident))
@@ -198,7 +225,7 @@ ready:
 			fmt.Printf("UI view done\n")
 			break ready
 		case <-waitTimeout.Done():
-			fmt.Print("Closing current UI view from timeout")
+			fmt.Print("Closing current UI view from timeout\n")
 			v.Close()
 			break ready
 		}
@@ -206,12 +233,16 @@ ready:
 }
 
 func (ww *WhatsWhatApp) updateOverlayUiView(v view.Message, member view.UiView, waitDone bool) {
+	fmt.Printf("updateOverlayUiView: %s\n waiting for current overlay to finish", v)
 	// Wait for any other overlays to complete
 	ww.waitViewDone(ww.ui.overlay)
 
-	ww.overlay.SetChild(member)
+	fmt.Printf("setting overlay child\n")
 
+	ww.overlay.SetChild(member)
 	ww.ui.overlay = member
+
+	fmt.Printf("updateOverlayUiView: Done\n")
 }
 
 func (ww *WhatsWhatApp) updateCurrentUiView(v view.Message, member view.UiView, changeVisibleChild bool, pushHistory bool, waitDone bool) {

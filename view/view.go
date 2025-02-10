@@ -1,6 +1,8 @@
 package view
 
 import (
+	"context"
+
 	"github.com/diamondburned/gotk4/pkg/gtk/v4"
 	"github.com/tiggilyboo/whatswhat/db"
 	"go.mau.fi/whatsmeow"
@@ -51,4 +53,5 @@ type UiParent interface {
 	GetContacts() (map[types.JID]types.ContactInfo, error)
 	GetDeviceJID() *types.JID
 	GetWindowSize() (int, int)
+	RequestHistory(chatJID types.JID, count int, ctx context.Context, cancel context.CancelFunc, feedback func(error))
 }
