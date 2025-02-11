@@ -45,6 +45,11 @@ type UiView interface {
 	Title() string
 }
 
+type RequestInfo interface {
+	JID() *types.JID
+	Err() error
+}
+
 type UiParent interface {
 	QueueMessage(v Message, payload interface{})
 	QueueMessageWithIntent(v Message, payload interface{}, intent Response)
@@ -53,5 +58,5 @@ type UiParent interface {
 	GetContacts() (map[types.JID]types.ContactInfo, error)
 	GetDeviceJID() *types.JID
 	GetWindowSize() (int, int)
-	RequestHistory(chatJID types.JID, count int, ctx context.Context, cancel context.CancelFunc, feedback func(error))
+	RequestHistory(chatJID types.JID, count int, ctx context.Context, cancel context.CancelFunc, feedback chan RequestInfo)
 }

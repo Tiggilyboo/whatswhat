@@ -34,17 +34,20 @@ import (
 
 type WhatsWhatApp struct {
 	*gtk.Application
-	window   *gtk.ApplicationWindow
-	header   *gtk.HeaderBar
-	back     *gtk.Button
-	profile  *gtk.Button
-	overlay  *gtk.Overlay
-	client   *whatsmeow.Client
-	chatDB   *db.Database
-	notifier *services.NotificationService
-	contacts map[types.JID]types.ContactInfo
-	viewChan chan view.UiMessage
-	ctx      context.Context
+	window           *gtk.ApplicationWindow
+	header           *gtk.HeaderBar
+	back             *gtk.Button
+	profile          *gtk.Button
+	reconnect        *gtk.Button
+	overlay          *gtk.Overlay
+	client           *whatsmeow.Client
+	chatDB           *db.Database
+	notifier         *services.NotificationService
+	contacts         map[types.JID]types.ContactInfo
+	viewChan         chan view.UiMessage
+	ctx              context.Context
+	connected        bool
+	onDemandRequests map[types.JID]chan view.RequestInfo
 
 	ui struct {
 		*gtk.Stack
@@ -57,8 +60,9 @@ type WhatsWhatApp struct {
 
 func NewWhatsWhatApp(ctx context.Context, app *gtk.Application) (*WhatsWhatApp, error) {
 	ww := WhatsWhatApp{
-		Application: app,
-		ctx:         ctx,
+		Application:      app,
+		ctx:              ctx,
+		onDemandRequests: make(map[types.JID]chan view.RequestInfo),
 	}
 
 	notifier, err := services.NewNotificationService(ctx)
@@ -101,9 +105,21 @@ func NewWhatsWhatApp(ctx context.Context, app *gtk.Application) (*WhatsWhatApp, 
 		ww.QueueMessage(view.ProfileView, nil)
 	})
 
+	ww.reconnect = gtk.NewButtonFromIconName("computer-fail-symbolic")
+	ww.reconnect.SetTooltipText("Disconnected")
+	ww.reconnect.SetVisible(false)
+	ww.reconnect.ConnectClicked(func() {
+		ctx, cancel := context.WithTimeout(ww.ctx, 5*time.Second)
+		context.AfterFunc(ctx, func() {
+			ww.reconnect.SetVisible(!ww.connected)
+		})
+		go ww.waitReconnect(ww.ctx, cancel)
+	})
+
 	ww.header = gtk.NewHeaderBar()
 	ww.header.PackStart(ww.back)
 	ww.header.PackEnd(ww.profile)
+	ww.header.PackEnd(ww.reconnect)
 
 	ww.window = gtk.NewApplicationWindow(app)
 	ww.window.SetDefaultSize(800, 600)
@@ -167,7 +183,8 @@ func (ww *WhatsWhatApp) GetContacts() (map[types.JID]types.ContactInfo, error) {
 	return contacts, nil
 }
 
-func (ww *WhatsWhatApp) RequestHistory(chatJID types.JID, count int, ctx context.Context, cancel context.CancelFunc, feedback func(error)) {
+func (ww *WhatsWhatApp) RequestHistory(chatJID types.JID, count int, ctx context.Context, cancel context.CancelFunc, feedback chan view.RequestInfo) {
+	fmt.Printf("RequestHistory: %s: %v", chatJID, ctx.Err())
 	defer cancel()
 
 	fmt.Printf("Building history request: %s for %d messages\n", chatJID, count)
@@ -187,11 +204,28 @@ func (ww *WhatsWhatApp) RequestHistory(chatJID types.JID, count int, ctx context
 	}
 	histRes, err := client.SendMessage(ctx, chatJID, histReq, extraReq)
 	if err != nil {
-		feedback(err)
+		if ctx.Err() == nil {
+			info := models.OnDemandRequestInfo{
+				ChatJID: chatJID,
+				Error:   err,
+			}
+			feedback <- info
+
+			existing := ww.onDemandRequests[chatJID]
+			if existing != nil {
+				// It's not our responsibility to close channels, we just accept them. Whoever creates them also closes them
+				ww.onDemandRequests[chatJID] = nil
+			}
+		}
+
+		fmt.Printf("Error sending history request: %s\n", err.Error())
+		return
 	}
 
 	fmt.Printf("Sent history request: %s\n", histRes.ID)
-	feedback(nil)
+
+	// Don't send success feedback until we've received the response from history sync!
+	ww.onDemandRequests[chatJID] = feedback
 }
 
 func (ww *WhatsWhatApp) subscribeUiView(ident view.Message, ui view.UiView) {
@@ -453,30 +487,50 @@ func (ww *WhatsWhatApp) handleMessage(evt *events.Message) {
 	// TODO: Added to DB, now update the chat UI
 }
 
-func (ww *WhatsWhatApp) handleLoggedOut(evt *events.LoggedOut) {
+func (ww *WhatsWhatApp) waitReconnect(ctx context.Context, cancel context.CancelFunc) {
+	defer cancel()
+	ww.connected = ww.client.IsConnected()
 
-	ww.ui.history.Clear()
-	ww.QueueMessage(view.ChatListView, nil)
-
-	deviceJID := ww.GetDeviceJID()
-
-	// Try to connect again?
-	if evt.OnConnect && !ww.client.IsConnected() {
-		err := ww.client.Connect()
-		if err != nil {
-			ww.QueueMessage(view.QrView, fmt.Errorf("Unable to reconnect: %s", err.Error()))
+	for !ww.connected {
+		select {
+		case <-ctx.Done():
+			ww.QueueMessage(view.ErrorView, fmt.Errorf("Unable to reconnect: %v", ctx.Err()))
 			return
+		default:
+			ww.connected = ww.client.IsConnected()
+			time.Sleep(500 * time.Millisecond)
 		}
 	}
+}
+
+func (ww *WhatsWhatApp) handleLoggedOut(evt *events.LoggedOut) {
+	fmt.Printf("handleLoggedOut: %v, IsLoggedOut: %v\n", evt.Reason, evt.Reason.IsLoggedOut())
+
+	ww.ui.history.Clear()
 
 	// Delete session data?
 	if evt.Reason.IsLoggedOut() {
-		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-		defer cancel()
-		go ww.chatDB.Conversation.DeleteAll(ctx, *deviceJID)
+		go ww.ClearChatDatabase()
+	} else {
+		ww.reconnect.SetVisible(true)
+	}
+}
+
+func (ww *WhatsWhatApp) ClearChatDatabase() {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	deviceJID := ww.GetDeviceJID()
+	fmt.Printf("Clearing database for %s\n", deviceJID.String())
+
+	if err := ww.chatDB.Conversation.DeleteAll(ctx, *deviceJID); err != nil {
+		fmt.Printf("Error clearing conversations: %s", err.Error())
+	}
+	if err := ww.chatDB.Message.DeleteAll(ctx, *deviceJID); err != nil {
+		fmt.Printf("Error clearing messages: %s", err.Error())
 	}
 
-	ww.QueueMessage(view.LoadingView, evt.Reason.String())
+	fmt.Printf("Cleared database.\n")
 }
 
 func (ww *WhatsWhatApp) handleHistorySync(evt *events.HistorySync) {
@@ -496,6 +550,7 @@ func (ww *WhatsWhatApp) handleHistorySync(evt *events.HistorySync) {
 	})
 	defer cancel()
 
+	isOnDemand := *evt.Data.SyncType.Enum() == waHistorySync.HistorySync_ON_DEMAND
 	failedToSaveConversations := 0
 	failedToSaveMessages := 0
 	addedMessages := 0
@@ -509,6 +564,7 @@ func (ww *WhatsWhatApp) handleHistorySync(evt *events.HistorySync) {
 		}
 
 		var maxTime time.Time
+		var minTime time.Time
 		messages := make([]*wwdb.HistorySyncMessageTuple, 0, len(convo.GetMessages()))
 		for _, rawMsg := range convo.GetMessages() {
 			msgEvt, err := ww.client.ParseWebMessage(chatJID, rawMsg.GetMessage())
@@ -518,6 +574,9 @@ func (ww *WhatsWhatApp) handleHistorySync(evt *events.HistorySync) {
 			}
 			if maxTime.IsZero() || msgEvt.Info.Timestamp.After(maxTime) {
 				maxTime = msgEvt.Info.Timestamp
+			}
+			if minTime.IsZero() || msgEvt.Info.Timestamp.Before(minTime) {
+				minTime = msgEvt.Info.Timestamp
 			}
 
 			marshaled, err := proto.Marshal(rawMsg)
@@ -531,6 +590,15 @@ func (ww *WhatsWhatApp) handleHistorySync(evt *events.HistorySync) {
 				Message: marshaled,
 			}
 			messages = append(messages, tuple)
+		}
+		if isOnDemand {
+			requestInfo := ww.onDemandRequests[chatJID]
+			if requestInfo != nil {
+				requestInfo <- models.OnDemandRequestInfo{
+					ChatJID: chatJID,
+					MinTime: minTime,
+				}
+			}
 		}
 
 		// Update the last message time

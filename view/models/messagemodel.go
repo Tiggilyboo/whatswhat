@@ -25,7 +25,7 @@ const (
 	MessageTypeDocument
 )
 
-var inlineURLRegex = regexp.MustCompile(`\[(.+?)]\((.+?)\)`)
+var urlRegex = regexp.MustCompile(`(https?://[^\s<>"'()]+)`)
 
 type MessageModel struct {
 	ID          types.MessageID
@@ -229,9 +229,8 @@ func (mm *MessageModel) convertRawTextToMarkup(msg *waE2E.Message) {
 	fmt.Printf("Converting raw text to markup: %s", mm.Message)
 
 	// Replace links with html
-	mm.Message = inlineURLRegex.ReplaceAllStringFunc(mm.Message, func(s string) string {
-		groups := inlineURLRegex.FindStringSubmatch(s)
-		return fmt.Sprintf(`<a href="%s">%s</a>`, groups[2], groups[1])
+	mm.Message = urlRegex.ReplaceAllStringFunc(mm.Message, func(match string) string {
+		return fmt.Sprintf(`<a href="%s">%s</a>`, match, match)
 	})
 	fmt.Printf(" to: %s\n", mm.Message)
 }
