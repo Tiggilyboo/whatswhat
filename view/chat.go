@@ -106,24 +106,28 @@ func (sr *statusRowUi) consumeFeedback() {
 			sr.SetStatus(v)
 		case nil:
 			sr.SetLoaded()
+		default:
+			sr.SetStatus(fmt.Sprintf("Unhandled status: %v", v))
 		}
 	}
 }
 
 type messageRowUi struct {
 	*gtk.ListBoxRow
-	parent     UiParent
-	message    *models.MessageModel
-	ui         *gtk.Box
-	uiTop      *gtk.Box
-	uiBottom   *gtk.Box
-	uiMedia    *gtk.Box
-	timestamp  *gtk.Label
-	text       *gtk.Label
-	sender     *gtk.Label
-	loadedChan chan int
-	loaded     bool
-	lock       sync.RWMutex
+	parent         UiParent
+	message        *models.MessageModel
+	ui             *gtk.Box
+	uiTop          *gtk.Box
+	uiBottom       *gtk.Box
+	uiMedia        *gtk.Box
+	uiMediaWidgets []gtk.Widgetter
+	timestamp      *gtk.Label
+	text           *gtk.Label
+	sender         *gtk.Label
+	loadedChan     chan int
+	loaded         bool
+	downloaded     bool
+	lock           sync.RWMutex
 }
 
 func (mr *messageRowUi) Timestamp() time.Time {
@@ -241,50 +245,113 @@ func (mr *messageRowUi) handleRowVisible() {
 	go mr.loadRowContent()
 }
 
+func (mr *messageRowUi) downloadMediaContent() ([]byte, error) {
+	mediaBytes, err := mr.parent.GetChatClient().Download(mr.message.Media)
+	if err != nil {
+		fmt.Printf("Unable to get media: %s", err.Error())
+		return nil, err
+	}
+	return mediaBytes, nil
+}
+
+func (mr *messageRowUi) populateMediaContent() {
+	if !mr.loaded {
+		return
+	}
+	if mr.downloaded {
+		return
+	}
+
+	mr.lock.Lock()
+	defer mr.lock.Unlock()
+
+	spinner := gtk.NewSpinner()
+	label := gtk.NewLabel("Downloading...")
+
+	mr.uiMediaWidgets = []gtk.Widgetter{label, spinner}
+	mr.uiMedia.Append(label)
+	mr.uiMedia.Append(spinner)
+
+	mediaBytes, err := mr.downloadMediaContent()
+	if err != nil {
+		label.SetLabel(fmt.Sprintf("Error downloading: %s", err))
+		spinner.SetVisible(false)
+		return
+	}
+
+	err = mr.updateMediaContent(mediaBytes)
+	if err != nil {
+		containsLabel := false
+		for _, mw := range mr.uiMediaWidgets {
+			if mw == label {
+				containsLabel = true
+				break
+			}
+		}
+		if !containsLabel {
+			mr.uiMedia.Append(label)
+		}
+		label.SetLabel(fmt.Sprintf("Error updating media: %s", err))
+	}
+
+	mr.downloaded = true
+}
+
+func (mr *messageRowUi) getScaledMediaDimensions() (int, int) {
+	imageWidth, imageHeight := 0, 0
+	w, h := mr.parent.GetWindowSize()
+	if mediaWithDims, ok := mr.message.Media.(models.MediaMessageWithDimensions); ok {
+		imageWidth = int(mediaWithDims.GetWidth())
+		imageHeight = int(mediaWithDims.GetHeight())
+	}
+	fmt.Printf("Loading image with dimensions: %d x %d into window with %d x %d", imageWidth, imageHeight, w, h)
+	if imageWidth > w-20 {
+		scale := float32(w) / float32(imageWidth)
+		scaledH := scale * float32(imageHeight)
+		h = int(scaledH)
+	}
+
+	return w, h
+
+}
+
 func (mr *messageRowUi) updateMediaContent(mediaBytes []byte) error {
 	mr.lock.Lock()
 	defer mr.lock.Unlock()
 
+	if mr.uiMediaWidgets != nil {
+		for _, widget := range mr.uiMediaWidgets {
+			mr.uiMedia.Remove(widget)
+		}
+	}
+
 	switch mr.message.MsgType {
 	case models.MessageTypeImage:
-		mediaGlibBytes := glib.NewBytes(mediaBytes)
-		mediaTexture, err := gdk.NewTextureFromBytes(mediaGlibBytes)
-		if err != nil {
-			return err
-		}
+		w, h := mr.getScaledMediaDimensions()
+		var mediaImage *gtk.Image
 
-		// resize texture to bound to screen width
-		w, h := mr.parent.GetWindowSize()
-
-		imageWidth := mediaTexture.Width()
-		imageHeight := mediaTexture.Height()
-		if mediaWithDims, ok := mr.message.Media.(models.MediaMessageWithDimensions); ok {
-			imageWidth = int(mediaWithDims.GetWidth())
-			imageHeight = int(mediaWithDims.GetHeight())
-		}
-		fmt.Printf("Loading image with dimensions: %d x %d into window with %d x %d", imageWidth, imageHeight, w, h)
-
-		if imageWidth > w-20 {
-			scale := float32(w) / float32(imageWidth)
-			scaledH := scale * float32(imageHeight)
-			h = int(scaledH)
-			fmt.Printf("Resizing image to %d x %d\n", w, h)
-
-			if w > 0 && h > 0 {
-				mediaPixbuf := gdk.PixbufGetFromTexture(mediaTexture)
-				mediaPixbuf = mediaPixbuf.ScaleSimple(w, h, gdkpixbuf.InterpBilinear)
-				mediaTexture = gdk.NewTextureForPixbuf(mediaPixbuf)
-				fmt.Printf("Resized image to %d x %d\n", w, h)
-			} else {
-				fmt.Printf("Unable to find reasonable image dimensions, not scaling\n")
+		if mediaBytes != nil {
+			mediaGlibBytes := glib.NewBytes(mediaBytes)
+			mediaTexture, err := gdk.NewTextureFromBytes(mediaGlibBytes)
+			if err != nil {
+				return err
 			}
+			mediaPixbuf := gdk.PixbufGetFromTexture(mediaTexture)
+			mediaPixbuf = mediaPixbuf.ScaleSimple(w, h, gdkpixbuf.InterpBilinear)
+			mediaTexture = gdk.NewTextureForPixbuf(mediaPixbuf)
+			fmt.Printf("Resized image to %d x %d\n", w, h)
+			if w <= 0 || h <= 0 {
+				w = mediaTexture.IntrinsicWidth()
+				h = mediaTexture.IntrinsicHeight()
+			}
+			mediaImage = gtk.NewImageFromPaintable(mediaTexture)
+			mediaImage.SetSizeRequest(w, h)
+		} else {
+			mediaImage := gtk.NewImageFromIconName("folder-download-symbolic")
+			mediaImage.SetIconSize(gtk.IconSizeLarge)
 		}
 
-		mediaImage := gtk.NewImageFromPaintable(mediaTexture)
-		mediaImage.SetSizeRequest(w, h)
-		mediaImage.SetHExpand(true)
-		mediaImage.SetVExpand(true)
-
+		mr.uiMediaWidgets = []gtk.Widgetter{mediaImage}
 		mr.uiMedia.Append(mediaImage)
 
 	case models.MessageTypeVideo:
@@ -292,8 +359,26 @@ func (mr *messageRowUi) updateMediaContent(mediaBytes []byte) error {
 	case models.MessageTypeAudio:
 		fmt.Println("Audio messages not implemented")
 	case models.MessageTypeDocument:
-		fmt.Println("Document messages not implemented")
+		uiDocument := gtk.NewBox(gtk.OrientationHorizontal, 5)
+		fileInfo := mr.message.Media.GetMimetype()
+		if mediaWithFileName, ok := mr.message.Media.(models.MediaMessageWithFileName); ok {
+			fileInfo = mediaWithFileName.GetFileName()
+		}
+		fileInfo += fmt.Sprintf("%s (%s)", fileInfo, *mr.message.MediaSize())
+
+		documentLabel := gtk.NewLabel(fileInfo)
+		uiDocument.Append(documentLabel)
+		documentButton := gtk.NewButtonFromIconName("folder-download-symbolic")
+		documentButton.ConnectClicked(func() {
+			mr.populateMediaContent()
+		})
+		uiDocument.Append(documentButton)
+
+		mr.uiMediaWidgets = []gtk.Widgetter{uiDocument}
+		mr.uiMedia.Append(uiDocument)
 	}
+
+	mr.downloaded = true
 
 	return nil
 }
@@ -310,11 +395,7 @@ func (mr *messageRowUi) loadRowContent() {
 
 	fmt.Printf("messageRowUi.loadRowContent")
 	if !mr.loaded && message.Media != nil {
-		mediaBytes, err := mr.parent.GetChatClient().Download(message.Media)
-		if err != nil {
-			fmt.Printf("Unable to get media: %s", err.Error())
-		}
-		err = mr.updateMediaContent(mediaBytes)
+		err := mr.updateMediaContent(nil)
 		if err != nil {
 			fmt.Printf("Unable to update media content UI: %s", err.Error())
 		}
@@ -427,17 +508,25 @@ func (ch *ChatUiView) newTaskWithTimeout(timeout time.Duration) {
 }
 
 func (ch *ChatUiView) Title() string {
-	return "WhatsWhat - Chat"
+	if ch.chat != nil && len(ch.chat.Name) > 0 {
+		return ch.chat.Name
+	} else {
+		return "Chat"
+	}
 }
 
 func (ch *ChatUiView) Done() <-chan struct{} {
 	return ch.ctx.Done()
 }
 
+func (ch *ChatUiView) ChatJID() types.JID {
+	return ch.chat.ChatJID
+}
+
 func (ch *ChatUiView) Close() {
 	fmt.Println("ChatUiView.Close: Started")
-	ch.lock.RLock()
-	defer ch.lock.RUnlock()
+	ch.lock.Lock()
+	defer ch.lock.Unlock()
 
 	chat := ch.parent.GetChatClient()
 	if ch.evtHandle != 0 && chat != nil {
@@ -539,7 +628,7 @@ func (ch *ChatUiView) chatLoadedMarkRead(chatJID types.JID, lastMessageTimestamp
 }
 
 func (ch *ChatUiView) Update(msg *UiMessage) (Response, error) {
-	fmt.Println("ChatUiView.Update: Invoked")
+	fmt.Printf("ChatUiView.Update: Invoked: %v", msg)
 
 	client := ch.parent.GetChatClient()
 	if client == nil || !client.IsConnected() {
@@ -608,14 +697,24 @@ func (ch *ChatUiView) Update(msg *UiMessage) (Response, error) {
 		// Set the period to load FROM
 		beforeTime = *t
 	case nil:
-		// Don't do anything, remain in the same chat
+		if msg.Intent == ResponseBackView {
+			ch.Close()
+			return msg.Intent, nil
+		} else {
+			// Don't do anything, remain in the same chat
+			fmt.Printf("ChatUiView.Update: remaining in chat view with intent: %v\n", msg.Intent)
+		}
 
 	default:
-		return ResponsePushView, fmt.Errorf("Unable to handle message payload: %s", t)
+		return ResponseReplaceView, fmt.Errorf("Unable to handle message payload: %s", t)
 	}
 
-	if !client.IsLoggedIn() {
-		return msg.Intent, nil
+	if !client.IsLoggedIn() || ch.closed {
+		fmt.Println("ChatUiView.Update: is closed or logged out")
+		if ch.cancel != nil {
+			ch.cancel()
+		}
+		return ResponseReplaceView, fmt.Errorf("Chat closed")
 	}
 
 	if !ch.closed {
@@ -697,6 +796,7 @@ func (ch *ChatUiView) LoadOlderMessages(limit int) {
 }
 
 func (ch *ChatUiView) LoadMessages(startTimestamp *time.Time, endTimestamp *time.Time, limit int) {
+	fmt.Println("LoadMessages: %v, %v, %d", startTimestamp, endTimestamp, limit)
 	if ch.closed {
 		return
 	}
@@ -723,7 +823,6 @@ func (ch *ChatUiView) LoadMessages(startTimestamp *time.Time, endTimestamp *time
 
 	// Request more history
 	if lenMessages == 0 && lenOrig > 0 {
-		fmt.Printf("No messages, loading more from history")
 		ch.loadMoreHistory()
 		return
 	}
@@ -865,20 +964,38 @@ func (ch *ChatUiView) getMessageTimestampRange() (time.Time, time.Time) {
 
 func (ch *ChatUiView) loadMoreHistory() {
 	fmt.Println("loadMoreHistory")
-	<-ch.statusRow.ctx.Done()
+
+ready:
+	for {
+		select {
+		case <-ch.ctx.Done():
+			return
+		case <-ch.statusRow.ctx.Done():
+			if ch.closed {
+				return
+			}
+			break ready
+		default:
+			// Don't request if contexts are busy
+			return
+		}
+	}
+
+	fmt.Println("loadMoreHistory: Setting UI")
 	ch.lock.Lock()
 	ch.statusRow.ctx, ch.statusRow.cancel = context.WithTimeout(context.Background(), 10*time.Second)
 	ch.statusRow.SetLoading("Requesting for more messages...")
 	ch.lock.Unlock()
 
 	feedback := make(chan RequestInfo, 1)
-	go ch.parent.RequestHistory(ch.chat.ChatJID, 30, ch.statusRow.ctx, ch.statusRow.cancel, feedback)
-	go ch.consumeRequestFeedback(ch.statusRow.ctx, feedback)
+	go ch.parent.RequestHistory(ch.chat.ChatJID, 30, ch.statusRow.ctx, feedback)
+	go ch.consumeRequestFeedback(ch.statusRow.ctx, ch.statusRow.cancel, feedback)
 	fmt.Println("loadMoreHistory: Done")
 }
 
-func (ch *ChatUiView) consumeRequestFeedback(ctx context.Context, feedback chan RequestInfo) {
+func (ch *ChatUiView) consumeRequestFeedback(ctx context.Context, cancel context.CancelFunc, feedback chan RequestInfo) {
 	defer close(feedback)
+	defer cancel()
 
 	var info RequestInfo = nil
 ready:

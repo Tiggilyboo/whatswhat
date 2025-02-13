@@ -58,5 +58,5 @@ type UiParent interface {
 	GetContacts() (map[types.JID]types.ContactInfo, error)
 	GetDeviceJID() *types.JID
 	GetWindowSize() (int, int)
-	RequestHistory(chatJID types.JID, count int, ctx context.Context, cancel context.CancelFunc, feedback chan RequestInfo)
+	RequestHistory(chatJID types.JID, count int, ctx context.Context, feedback chan RequestInfo)
 }

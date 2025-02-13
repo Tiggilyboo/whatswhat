@@ -3,6 +3,8 @@ package services
 import (
 	"context"
 	"fmt"
+	"sync"
+	"sync/atomic"
 
 	"github.com/esiqveland/notify"
 	"github.com/godbus/dbus/v5"
@@ -17,10 +19,13 @@ type Notification struct {
 }
 
 type NotificationService struct {
-	ctx              context.Context
-	notificationChan chan *Notification
-	conn             *dbus.Conn
-	notifier         notify.Notifier
+	ctx                    context.Context
+	notificationSendChan   chan *Notification
+	notificationActionChan chan *Notification
+	notificationsPending   sync.Map
+	conn                   *dbus.Conn
+	notifier               notify.Notifier
+	notificationCounter    atomic.Uint32
 }
 
 func NewNotificationService(ctx context.Context) (*NotificationService, error) {
@@ -35,9 +40,10 @@ func NewNotificationService(ctx context.Context) (*NotificationService, error) {
 		return nil, err
 	}
 	service := &NotificationService{
-		ctx:              ctx,
-		conn:             conn,
-		notificationChan: make(chan *Notification),
+		ctx:                    ctx,
+		conn:                   conn,
+		notificationSendChan:   make(chan *Notification),
+		notificationActionChan: make(chan *Notification),
 	}
 	notifier, err := notify.New(conn, notify.WithOnAction(service.handleNotificationAction))
 	if err != nil {
@@ -46,7 +52,7 @@ func NewNotificationService(ctx context.Context) (*NotificationService, error) {
 	service.notifier = notifier
 
 	// Cleanup everything when the passed context is stopped
-	context.AfterFunc(ctx, service.stop)
+	context.AfterFunc(ctx, service.Close)
 
 	go service.consumeNotifications()
 
@@ -54,18 +60,22 @@ func NewNotificationService(ctx context.Context) (*NotificationService, error) {
 }
 
 func (n *NotificationService) QueueNotification(notification *Notification) {
-	n.notificationChan <- notification
+	n.notificationSendChan <- notification
 }
 
 func (n *NotificationService) consumeNotifications() {
 	for {
 		select {
-		case notification := <-n.notificationChan:
+		case notification := <-n.notificationSendChan:
 			n.sendNotification(notification)
 		case <-n.ctx.Done():
 			return
 		}
 	}
+}
+
+func (n *NotificationService) NextNotificationID() uint32 {
+	return n.notificationCounter.Add(1)
 }
 
 func (n *NotificationService) sendNotification(notification *Notification) {
@@ -86,14 +96,27 @@ func (n *NotificationService) sendNotification(notification *Notification) {
 		fmt.Printf("error sending notification: %s\n", err.Error())
 		return
 	}
+
 	fmt.Printf("sent notification id: %v\n", id)
+	n.notificationsPending.Store(notification.ID, notification)
 }
 
-func (n *NotificationService) stop() {
+func (n *NotificationService) Close() {
 	n.conn.Close()
 	n.notifier.Close()
+	close(n.notificationActionChan)
+	close(n.notificationSendChan)
 }
 
 func (n *NotificationService) handleNotificationAction(s *notify.ActionInvokedSignal) {
 	fmt.Printf("Notification action invoked: %v Key: %v", s.ID, s.ActionKey)
+	if sentNotification, ok := n.notificationsPending.Load(s.ID); ok {
+		n.notificationActionChan <- sentNotification.(*Notification)
+		n.notificationsPending.Delete(s.ID)
+	}
+}
+
+func (n *NotificationService) handleNotificationClosed(s *notify.NotificationClosedSignal) {
+	fmt.Printf("Notification close invoked: %v Reason: %v", s.ID, s.Reason)
+	n.notificationsPending.Delete(s.ID)
 }

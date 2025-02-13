@@ -183,24 +183,31 @@ func (ww *WhatsWhatApp) GetContacts() (map[types.JID]types.ContactInfo, error) {
 	return contacts, nil
 }
 
-func (ww *WhatsWhatApp) RequestHistory(chatJID types.JID, count int, ctx context.Context, cancel context.CancelFunc, feedback chan view.RequestInfo) {
+func (ww *WhatsWhatApp) RequestHistory(chatJID types.JID, count int, ctx context.Context, feedback chan view.RequestInfo) {
 	fmt.Printf("RequestHistory: %s: %v", chatJID, ctx.Err())
-	defer cancel()
+
+	// TODO: Fix
+	// [Client WARN] Server returned different participant list hash when sending to xxxxxxx@s.whatsapp.net. Some devices may not have received the message.
+	//
+	// Causes blank messages to be sent to the chat!
 
 	fmt.Printf("Building history request: %s for %d messages\n", chatJID, count)
 	client := ww.GetChatClient()
+	id := client.GenerateMessageID()
 	lastKnownMsgInfo := &types.MessageInfo{
 		MessageSource: types.MessageSource{
 			Chat:     chatJID,
+			Sender:   *ww.GetDeviceJID(),
 			IsGroup:  chatJID.Server == types.GroupServer,
 			IsFromMe: false,
 		},
-		ID:        client.GenerateMessageID(),
+		ID:        id,
 		Timestamp: time.Now(),
 	}
 	histReq := client.BuildHistorySyncRequest(lastKnownMsgInfo, count)
 	extraReq := whatsmeow.SendRequestExtra{
 		Peer: true,
+		ID:   id,
 	}
 	histRes, err := client.SendMessage(ctx, chatJID, histReq, extraReq)
 	if err != nil {
@@ -384,12 +391,13 @@ func (ww *WhatsWhatApp) handleConnectedState(connected bool) {
 	}
 }
 
-func (ww *WhatsWhatApp) queueMessageNotification(id uint32, evt *events.Message) {
+func (ww *WhatsWhatApp) queueMessageNotification(evt *events.Message) {
 	msgModel, err := models.GetMessageModel(ww.client, evt.Info.Chat, evt)
 	if err != nil {
 		ww.QueueMessage(view.ErrorView, err)
 		return
 	}
+	id := ww.notifier.NextNotificationID()
 	notification := services.Notification{
 		ID:            id,
 		Summary:       msgModel.PushName,
@@ -400,7 +408,7 @@ func (ww *WhatsWhatApp) queueMessageNotification(id uint32, evt *events.Message)
 	ww.notifier.QueueNotification(&notification)
 }
 
-func (ww *WhatsWhatApp) queueUnreadChatNotification(id uint32, convo *waHistorySync.Conversation) {
+func (ww *WhatsWhatApp) queueUnreadChatNotification(convo *waHistorySync.Conversation) {
 	unreadCount := uint(convo.GetUnreadCount())
 	if unreadCount == 0 {
 		return
@@ -423,6 +431,7 @@ func (ww *WhatsWhatApp) queueUnreadChatNotification(id uint32, convo *waHistoryS
 		return
 	}
 
+	id := ww.notifier.NextNotificationID()
 	notification := services.Notification{
 		ID:            id,
 		Summary:       convoModel.Name,
@@ -453,8 +462,9 @@ func (ww *WhatsWhatApp) handleMessage(evt *events.Message) {
 	// Update the last message time to latest received event
 	existingChat.LastMessageTimestamp = evt.Info.Timestamp
 
-	// TODO: Notification ID from conversation ID
-	go ww.queueMessageNotification(0, evt)
+	if !evt.Info.IsFromMe {
+		go ww.queueMessageNotification(evt)
+	}
 
 	if err := ww.chatDB.Conversation.Put(ww.ctx, *deviceJID, existingChat); err != nil {
 		ww.QueueMessage(view.ErrorView, fmt.Errorf("Unable to Put conversation for new message: %s", err.Error()))
@@ -513,6 +523,36 @@ func (ww *WhatsWhatApp) handleLoggedOut(evt *events.LoggedOut) {
 		go ww.ClearChatDatabase()
 	} else {
 		ww.reconnect.SetVisible(true)
+	}
+}
+
+func (ww *WhatsWhatApp) handleDeleteChat(evt *events.DeleteChat) {
+	fmt.Printf("handleDeleteChat: %s, action: %v\n", evt.JID.String(), evt.Action)
+
+	if !ww.connected {
+		return
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	err := ww.chatDB.Conversation.Delete(ctx, *ww.GetDeviceJID(), evt.JID)
+	if err != nil {
+		ww.QueueMessage(view.ErrorView, fmt.Errorf("Unable to delete chat: %s", err.Error()))
+		return
+	}
+
+	currentView := ww.ui.history.Peek()
+	if currentView == view.ChatListView {
+		fmt.Println("Updating chat list view: chat was deleted")
+		ww.QueueMessageWithIntent(view.ChatListView, nil, view.ResponseIgnore)
+	} else if currentView == view.ChatView {
+		member := ww.ui.members[currentView]
+		chatView := member.(*view.ChatUiView)
+		if evt.JID.String() == chatView.ChatJID().String() {
+			fmt.Println("Leaving chat view: chat was deleted")
+			ww.QueueMessageWithIntent(view.ChatListView, nil, view.ResponseReplaceView)
+		}
 	}
 }
 
@@ -639,8 +679,7 @@ func (ww *WhatsWhatApp) handleHistorySync(evt *events.HistorySync) {
 
 		// Received some unread messages, send notifications
 		if len(messages) > 0 && convo.GetUnreadCount() > 0 {
-			// TODO: Notification ID from conversation ID
-			go ww.queueUnreadChatNotification(0, convo)
+			go ww.queueUnreadChatNotification(convo)
 		}
 	}
 
@@ -664,6 +703,10 @@ func (ww *WhatsWhatApp) handleCommonEvents(evt interface{}) {
 		ww.handleMessage(v)
 	case *events.LoggedOut:
 		ww.handleLoggedOut(v)
+	case *events.DeleteChat:
+		ww.handleDeleteChat(v)
+	default:
+		fmt.Printf("Unhandled event: %v\n", v)
 	}
 }
 
