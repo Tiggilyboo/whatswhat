@@ -9,8 +9,10 @@ import (
 )
 
 type ConversationMemberModel struct {
-	types.ContactInfo
-	JID types.JID
+	JID       types.JID
+	FirstName string
+	FullName  string
+	PushName  string
 }
 
 type ConversationModel struct {
@@ -21,31 +23,53 @@ type ConversationModel struct {
 	LastMessageTimestamp time.Time
 }
 
-func GetConversationModel(client *whatsmeow.Client, contacts map[types.JID]types.ContactInfo, chatJID types.JID, chatName string, unread uint, lastMessageTime time.Time, detailed bool) (*ConversationModel, error) {
-	var members []ConversationMemberModel
-	switch chatJID.Server {
-	case types.DefaultUserServer:
-		var members []ConversationMemberModel
-		if detailed {
-			members = make([]ConversationMemberModel, 2)
-			otherContact, ok := contacts[chatJID.ToNonAD()]
-			if !ok {
-				return nil, fmt.Errorf("Unable to find other contact in chat: %s", chatJID)
-			}
-			members[0] = ConversationMemberModel{
-				ContactInfo: otherContact,
-				JID:         chatJID,
-			}
-			currentContact, ok := contacts[client.Store.ID.ToNonAD()]
-			if !ok {
-				return nil, fmt.Errorf("Unable to find current user contact in chat: %s", chatJID)
-			}
-			members[1] = ConversationMemberModel{
-				ContactInfo: currentContact,
-				JID:         *client.Store.ID,
+func resolveMember(client *whatsmeow.Client, contacts map[types.JID]types.ContactInfo, pushNames map[types.JID]string, contactJID types.JID) ConversationMemberModel {
+	nonAdJid := contactJID.ToNonAD()
+	var member *ConversationMemberModel
+
+	if pushName, ok := pushNames[nonAdJid]; ok {
+		member = &ConversationMemberModel{
+			JID:       contactJID,
+			FirstName: pushName,
+			FullName:  pushName,
+			PushName:  pushName,
+		}
+	} else {
+		otherContact, ok := contacts[nonAdJid]
+		if !ok {
+			otherContact, _ = client.Store.Contacts.GetContact(nonAdJid)
+			ok = true
+		}
+		if ok {
+			member = &ConversationMemberModel{
+				JID:       contactJID,
+				FirstName: otherContact.FirstName,
+				FullName:  otherContact.FullName,
+				PushName:  otherContact.PushName,
 			}
 		}
 
+	}
+	if member == nil {
+		member = &ConversationMemberModel{
+			JID:       contactJID,
+			FirstName: contactJID.User,
+			FullName:  contactJID.Server,
+		}
+	}
+
+	return *member
+}
+
+func GetConversationModel(client *whatsmeow.Client, contacts map[types.JID]types.ContactInfo, pushNames map[types.JID]string, chatJID types.JID, chatName string, unread uint, lastMessageTime time.Time, detailed bool) (*ConversationModel, error) {
+	var members []ConversationMemberModel
+	switch chatJID.Server {
+	case types.DefaultUserServer:
+		if detailed {
+			members = make([]ConversationMemberModel, 2)
+			members[0] = resolveMember(client, contacts, pushNames, chatJID)
+			members[1] = resolveMember(client, contacts, pushNames, *client.Store.ID)
+		}
 	case types.NewsletterServer:
 		if detailed {
 			info, err := client.GetNewsletterInfo(chatJID)
@@ -54,7 +78,7 @@ func GetConversationModel(client *whatsmeow.Client, contacts map[types.JID]types
 			}
 			chatName = info.ThreadMeta.Name.Text
 		}
-		members = make([]ConversationMemberModel, 0)
+		members = []ConversationMemberModel{}
 
 	case types.GroupServer:
 
@@ -65,20 +89,8 @@ func GetConversationModel(client *whatsmeow.Client, contacts map[types.JID]types
 			}
 			members := make([]ConversationMemberModel, len(info.Participants))
 			groupParticipants := info.Participants
-			for _, p := range groupParticipants {
-				memberContact, ok := contacts[p.JID.ToNonAD()]
-				if !ok {
-					memberContact, err = client.Store.Contacts.GetContact(p.JID)
-					if err != nil {
-						fmt.Printf("Unable to find group '%s' participant %s\n", info.Name, p.DisplayName)
-						continue
-					}
-				}
-
-				members = append(members, ConversationMemberModel{
-					ContactInfo: memberContact,
-					JID:         p.JID,
-				})
+			for i, p := range groupParticipants {
+				members[i] = resolveMember(client, contacts, pushNames, p.JID)
 			}
 		}
 

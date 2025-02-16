@@ -27,8 +27,13 @@ type chatItemRow struct {
 }
 
 func NewChatRow(ctx context.Context, parent UiParent, chat *db.Conversation) (*chatItemRow, error) {
+	//fmt.Println("NewChatRow")
 	client := parent.GetChatClient()
 	contacts, err := parent.GetContacts()
+	if err != nil {
+		return nil, err
+	}
+	pushNames, err := parent.GetPushNames()
 	if err != nil {
 		return nil, err
 	}
@@ -36,9 +41,9 @@ func NewChatRow(ctx context.Context, parent UiParent, chat *db.Conversation) (*c
 	if chat.UnreadCount != nil {
 		unread = uint(*chat.UnreadCount)
 	}
-	chatInfo, err := models.GetConversationModel(client, contacts, chat.ChatJID, chat.Name, unread, chat.LastMessageTimestamp, false)
+	chatInfo, err := models.GetConversationModel(client, contacts, pushNames, chat.ChatJID, chat.Name, unread, chat.LastMessageTimestamp, false)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("Error GetConversationModel: %s", err.Error())
 	}
 
 	chatItemRow := chatItemRow{
@@ -59,7 +64,7 @@ func NewChatRow(ctx context.Context, parent UiParent, chat *db.Conversation) (*c
 	chatItemRow.ListBoxRow.SetChild(ui)
 
 	if err := chatItemRow.Update(ctx, chatInfo); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("Error chatItemRow.Update: %s", err.Error())
 	}
 
 	return &chatItemRow, nil
@@ -74,10 +79,12 @@ func (ci *chatItemRow) Update(ctx context.Context, model *models.ConversationMod
 	}
 	title := gtk.NewLabel(titleText)
 	titleFont := title.PangoContext().FontDescription()
-	titleFont.SetSize(16 * pango.SCALE)
+	titleFont.SetSize(14 * pango.SCALE)
 	title.PangoContext().SetFontDescription(titleFont)
 	title.SetVExpand(true)
 	title.SetVAlign(gtk.AlignFill)
+	title.SetWrap(true)
+	title.SetWrapMode(pango.WrapWordChar)
 	if ci.title != nil {
 		ci.uiTop.Remove(ci.title)
 	}
@@ -104,20 +111,18 @@ func (ci *chatItemRow) Update(ctx context.Context, model *models.ConversationMod
 
 	mostRecentMessages, err := chatDb.Message.GetBetween(ctx, *deviceJID, model.ChatJID, nil, nil, 1)
 	if err != nil {
-		return err
+		fmt.Printf("Unable to load last message for: %s", model.ChatJID)
+		mostRecentMessages = make([]db.Message, 0)
 	}
 
 	var lastMessageText *string
 	var lastMessageTimestamp *time.Time
 	if len(mostRecentMessages) > 0 {
-		eventMsg, err := client.ParseWebMessage(model.ChatJID, mostRecentMessages[0])
+		messageModel, err := models.GetMessageModel(client, model.ChatJID, &mostRecentMessages[0])
 		if err == nil {
-			messageModel, err := models.GetMessageModel(client, model.ChatJID, eventMsg)
-			if err == nil {
-				lastMessageTrimmed := fmt.Sprintf("%.*s", 35, messageModel.Message)
-				lastMessageText = &lastMessageTrimmed
-				lastMessageTimestamp = &messageModel.Timestamp
-			}
+			lastMessageTrimmed := fmt.Sprintf("%.*s", 35, messageModel.Message)
+			lastMessageText = &lastMessageTrimmed
+			lastMessageTimestamp = &messageModel.Timestamp
 		}
 	}
 
@@ -182,6 +187,7 @@ func NewChatListView(parent UiParent) *ChatListUiView {
 	v.chatList.SetVExpand(true)
 	v.chatList.SetVisible(false)
 	v.chatList.SetSelectionMode(gtk.SelectionSingle)
+	v.chatList.UnselectAll()
 	v.chatList.ConnectRowSelected(v.handleChatSelected)
 	v.view.Append(v.chatList)
 
@@ -247,6 +253,8 @@ func (ch *ChatListUiView) handleChatSelected(row *gtk.ListBoxRow) {
 	if !row.IsSelected() {
 		return
 	}
+	fmt.Printf("Selected chat row: %s\n", row.Index())
+
 	if row.Index() >= len(ch.chats) || row.Index() < 0 {
 		ch.parent.QueueMessage(ErrorView, fmt.Errorf("Invalid chat row index: %d", row.Index()))
 		return
@@ -254,6 +262,7 @@ func (ch *ChatListUiView) handleChatSelected(row *gtk.ListBoxRow) {
 	chatRowUi := ch.chats[row.Index()]
 	if chatRowUi == nil {
 		ch.parent.QueueMessage(ErrorView, fmt.Errorf("Invalid chat row UI: %d", row.Index()))
+		return
 	}
 
 	chat := chatRowUi.chat
@@ -288,7 +297,7 @@ func (ch *ChatListUiView) Update(msg *UiMessage) (Response, error) {
 			ch.Close()
 		}
 	}
-	ch.ctx, ch.cancel = context.WithDeadline(context.Background(), time.Now().Add(2*time.Second))
+	ch.ctx, ch.cancel = context.WithTimeout(context.Background(), 2*time.Second)
 	defer ch.cancel()
 
 	if initialize || ch.evtHandle == 0 {
@@ -302,39 +311,41 @@ func (ch *ChatListUiView) Update(msg *UiMessage) (Response, error) {
 		return msg.Intent, nil
 	}
 
-	if initialize {
-		fmt.Println("Getting conversations from chat DB...")
-		chatDb := ch.parent.GetChatDB()
-		archived := false
-		conversations, err := chatDb.Conversation.GetRecent(ch.ctx, *client.Store.ID, 100, archived)
-		if err != nil {
-			return ResponsePushView, err
-		}
-
-		fmt.Printf("Got %s conversations\n", len(conversations))
-
-		chats := make([]*chatItemRow, len(conversations))
-		for i, convo := range conversations {
-			chatRow, err := NewChatRow(ch.ctx, ch.parent, convo)
-			if err != nil {
-				return ResponsePushView, err
-			}
-
-			// By default don't process any selection until a user clicks the item
-			chatRow.SetSelectable(false)
-
-			fmt.Printf("Appending %s into row index: %d\n", chatRow.chat.Name, i)
-			ch.chatList.Append(chatRow)
-			chats[i] = chatRow
-		}
-		ch.chats = chats
-
-		// Allow any selections
-		ch.chatList.UnselectAll()
-		for i, _ := range conversations {
-			ch.chats[i].SetSelectable(true)
-		}
+	fmt.Println("Getting conversations from chat DB...")
+	chatDb := ch.parent.GetChatDB()
+	archived := false
+	conversations, err := chatDb.Conversation.GetRecent(ch.ctx, *ch.parent.GetDeviceJID(), 100, archived)
+	if err != nil {
+		return ResponsePushView, fmt.Errorf("Error getting recent conversations: %s", err.Error())
 	}
+
+	fmt.Printf("Got %s conversations\n", len(conversations))
+
+	ch.chatList.UnselectAll()
+	ch.chatList.RemoveAll()
+
+	chats := make([]*chatItemRow, len(conversations))
+	for i, convo := range conversations {
+		chatRow, err := NewChatRow(ch.ctx, ch.parent, convo)
+		if err != nil {
+			return ResponsePushView, fmt.Errorf("Error creating chat row: %s", err.Error())
+		}
+
+		// By default don't process any selection until a user clicks the item
+		chatRow.SetSelectable(false)
+
+		//fmt.Printf("Appending %s into row index: %d\n", chatRow.chat.Name, i)
+		ch.chatList.Append(chatRow)
+		chats[i] = chatRow
+	}
+	ch.chats = chats
+
+	// Allow any selections
+	ch.chatList.UnselectAll()
+	for _, chatRow := range chats {
+		chatRow.SetSelectable(true)
+	}
+
 	ch.chatList.SetVisible(true)
 	ch.login.SetVisible(false)
 

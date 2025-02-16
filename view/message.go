@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/diamondburned/gotk4/pkg/gtk/v4"
+	"github.com/diamondburned/gotk4/pkg/pango"
 )
 
 type MessageUiView struct {
@@ -26,6 +27,10 @@ func NewMessageView(parent UiParent) *MessageUiView {
 		Box:     gtk.NewBox(gtk.OrientationVertical, 0),
 		message: gtk.NewLabel(""),
 	}
+	v.message.SetSingleLineMode(false)
+	v.message.SetWrapMode(pango.WrapWordChar)
+	v.message.SetWrap(true)
+
 	v.Append(v.message)
 
 	return &v

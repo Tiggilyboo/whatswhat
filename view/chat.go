@@ -12,9 +12,11 @@ import (
 	"github.com/diamondburned/gotk4/pkg/glib/v2"
 	"github.com/diamondburned/gotk4/pkg/gtk/v4"
 	"github.com/diamondburned/gotk4/pkg/pango"
+	"github.com/tiggilyboo/whatswhat/db"
 	"github.com/tiggilyboo/whatswhat/view/models"
 	"go.mau.fi/whatsmeow/appstate"
 	"go.mau.fi/whatsmeow/proto/waE2E"
+
 	"go.mau.fi/whatsmeow/proto/waSyncAction"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
@@ -162,17 +164,25 @@ func NewMessageRowUi(parent UiParent, message *models.MessageModel, loadedChan c
 	} else if len(message.PushName) > 0 {
 		senderText = message.PushName
 	} else {
-		contacts, err := parent.GetContacts()
-		if err != nil {
-			if !message.IsGroup {
-				senderText = message.SenderJID.User
+		pushNames, err := parent.GetPushNames()
+		if err == nil {
+			if pushName, ok := pushNames[message.SenderJID]; ok {
+				senderText = pushName
 			}
-		} else {
-			senderContact, ok := contacts[message.SenderJID.ToNonAD()]
-			if !ok {
-				senderText = message.SenderJID.User
+		}
+		if len(senderText) == 0 {
+			contacts, err := parent.GetContacts()
+			if err != nil {
+				if !message.IsGroup {
+					senderText = message.SenderJID.User
+				}
 			} else {
-				senderText = senderContact.FullName
+				senderContact, ok := contacts[message.SenderJID.ToNonAD()]
+				if !ok {
+					senderText = message.SenderJID.User
+				} else {
+					senderText = senderContact.FullName
+				}
 			}
 		}
 	}
@@ -255,6 +265,7 @@ func (mr *messageRowUi) downloadMediaContent() ([]byte, error) {
 }
 
 func (mr *messageRowUi) populateMediaContent() {
+	fmt.Printf("populateMediaContent: loaded %v, downloaded: %v, msgID: %s", mr.loaded, mr.downloaded, mr.message.ID)
 	if !mr.loaded {
 		return
 	}
@@ -262,15 +273,25 @@ func (mr *messageRowUi) populateMediaContent() {
 		return
 	}
 
+	fmt.Printf("populateMediaContent: locking")
 	mr.lock.Lock()
-	defer mr.lock.Unlock()
+	fmt.Printf("populateMediaContent: locked")
 
+	if mr.uiMediaWidgets != nil {
+		for _, widget := range mr.uiMediaWidgets {
+			mr.uiMedia.Remove(widget)
+		}
+	}
 	spinner := gtk.NewSpinner()
+	spinner.SetSpinning(true)
 	label := gtk.NewLabel("Downloading...")
 
 	mr.uiMediaWidgets = []gtk.Widgetter{label, spinner}
 	mr.uiMedia.Append(label)
 	mr.uiMedia.Append(spinner)
+
+	mr.lock.Unlock()
+	fmt.Printf("populateMediaContent: unlocked")
 
 	mediaBytes, err := mr.downloadMediaContent()
 	if err != nil {
@@ -281,20 +302,14 @@ func (mr *messageRowUi) populateMediaContent() {
 
 	err = mr.updateMediaContent(mediaBytes)
 	if err != nil {
-		containsLabel := false
-		for _, mw := range mr.uiMediaWidgets {
-			if mw == label {
-				containsLabel = true
-				break
-			}
-		}
-		if !containsLabel {
-			mr.uiMedia.Append(label)
-		}
 		label.SetLabel(fmt.Sprintf("Error updating media: %s", err))
+		return
 	}
 
+	mr.lock.Lock()
 	mr.downloaded = true
+	mr.lock.Unlock()
+	fmt.Printf("populateMediaContent: done, downloaded")
 }
 
 func (mr *messageRowUi) getScaledMediaDimensions() (int, int) {
@@ -320,23 +335,32 @@ func (mr *messageRowUi) updateMediaContent(mediaBytes []byte) error {
 	defer mr.lock.Unlock()
 
 	if mr.uiMediaWidgets != nil {
+		fmt.Println("Removing existing media widgets: %d\n", len(mr.uiMediaWidgets))
 		for _, widget := range mr.uiMediaWidgets {
+			if widget == nil {
+				continue
+			}
 			mr.uiMedia.Remove(widget)
 		}
 	}
+	mr.uiMediaWidgets = make([]gtk.Widgetter, 0)
 
 	switch mr.message.MsgType {
 	case models.MessageTypeImage:
 		w, h := mr.getScaledMediaDimensions()
-		var mediaImage *gtk.Image
 
+		var mediaWidget gtk.Widgetter
 		if mediaBytes != nil {
+			fmt.Printf("Loading %d image bytes\n", len(mediaBytes))
+
 			mediaGlibBytes := glib.NewBytes(mediaBytes)
 			mediaTexture, err := gdk.NewTextureFromBytes(mediaGlibBytes)
 			if err != nil {
 				return err
 			}
+			fmt.Printf("Getting pixbuf from texture")
 			mediaPixbuf := gdk.PixbufGetFromTexture(mediaTexture)
+			fmt.Printf("ScaleSimple: %d x %d\n", w, h)
 			mediaPixbuf = mediaPixbuf.ScaleSimple(w, h, gdkpixbuf.InterpBilinear)
 			mediaTexture = gdk.NewTextureForPixbuf(mediaPixbuf)
 			fmt.Printf("Resized image to %d x %d\n", w, h)
@@ -344,21 +368,45 @@ func (mr *messageRowUi) updateMediaContent(mediaBytes []byte) error {
 				w = mediaTexture.IntrinsicWidth()
 				h = mediaTexture.IntrinsicHeight()
 			}
-			mediaImage = gtk.NewImageFromPaintable(mediaTexture)
+			mediaImage := gtk.NewImage()
+			mediaImage.SetFromPaintable(mediaTexture)
 			mediaImage.SetSizeRequest(w, h)
+			mediaWidget = mediaImage
 		} else {
-			mediaImage := gtk.NewImageFromIconName("folder-download-symbolic")
-			mediaImage.SetIconSize(gtk.IconSizeLarge)
+			mediaContainer := gtk.NewBox(gtk.OrientationHorizontal, 5)
+			fileInfo := mr.message.Media.GetMimetype()
+			if mediaWithFileName, ok := mr.message.Media.(models.MediaMessageWithFileName); ok {
+				fileInfo = mediaWithFileName.GetFileName()
+			}
+			mediaSize := mr.message.MediaSize()
+			if mediaSize != nil {
+				fileInfo += fmt.Sprintf("%s (%s)", fileInfo, *mediaSize)
+			}
+
+			documentLabel := gtk.NewLabel(fileInfo)
+			mediaContainer.Append(documentLabel)
+			mediaDownloadButton := gtk.NewButtonFromIconName("folder-download-symbolic")
+			mediaDownloadButton.ConnectClicked(func() {
+				go mr.populateMediaContent()
+			})
+			mediaContainer.Append(mediaDownloadButton)
+			mediaWidget = mediaContainer
 		}
 
-		mr.uiMediaWidgets = []gtk.Widgetter{mediaImage}
-		mr.uiMedia.Append(mediaImage)
+		mr.uiMediaWidgets = []gtk.Widgetter{mediaWidget}
+		mr.uiMedia.Append(mediaWidget)
 
 	case models.MessageTypeVideo:
 		fmt.Println("Video messages not implemented")
 	case models.MessageTypeAudio:
 		fmt.Println("Audio messages not implemented")
 	case models.MessageTypeDocument:
+		if mediaBytes != nil {
+			fmt.Printf("Loading %d document bytes\n", len(mediaBytes))
+
+			return nil
+		}
+
 		uiDocument := gtk.NewBox(gtk.OrientationHorizontal, 5)
 		fileInfo := mr.message.Media.GetMimetype()
 		if mediaWithFileName, ok := mr.message.Media.(models.MediaMessageWithFileName); ok {
@@ -378,13 +426,17 @@ func (mr *messageRowUi) updateMediaContent(mediaBytes []byte) error {
 		mr.uiMedia.Append(uiDocument)
 	}
 
-	mr.downloaded = true
-
 	return nil
 }
 
 func (mr *messageRowUi) loadRowContent() {
+	if mr == nil {
+		return
+	}
 	if mr.loaded {
+		return
+	}
+	if mr.downloaded {
 		return
 	}
 
@@ -542,7 +594,7 @@ func (ch *ChatUiView) Close() {
 }
 
 func (ch *ChatUiView) chatEventHandler(evt interface{}) {
-	switch evt.(type) {
+	switch v := evt.(type) {
 	case *events.Connected:
 		fmt.Println("ChatUiView.chatEventHandler: Connected")
 		ch.parent.QueueMessageWithIntent(ChatListView, nil, ResponseBackView)
@@ -554,6 +606,8 @@ func (ch *ChatUiView) chatEventHandler(evt interface{}) {
 	case *events.LoggedOut:
 		fmt.Println("ChatUiView.chatEventHandler: Logged out")
 		ch.parent.QueueMessageWithIntent(ChatListView, nil, ResponseBackView)
+	case *events.Message:
+		fmt.Println("ChatUiView got message: %v", v)
 	}
 }
 
@@ -825,21 +879,16 @@ func (ch *ChatUiView) LoadMessages(startTimestamp *time.Time, endTimestamp *time
 	if lenMessages == 0 && lenOrig > 0 {
 		ch.loadMoreHistory()
 		return
+	} else if lenMessages == 0 && lenOrig == 0 {
+		ch.statusRow.SetStatus("No messages")
 	}
 
 	// Convert messages to models
 	msgModels := make([]*models.MessageModel, lenMessages)
 	for i, message := range messages {
 
-		// convert to message event
-		msgEvent, err := client.ParseWebMessage(chatJID, message)
-		if err != nil {
-			ch.parent.QueueMessage(ErrorView, fmt.Errorf("Unable to parse web message for chat: %v", err))
-			return
-		}
-
 		// convert to UI model
-		model, err := models.GetMessageModel(client, chatJID, msgEvent)
+		model, err := models.GetMessageModel(client, chatJID, &message)
 		if err != nil {
 			ch.parent.QueueMessage(ErrorView, fmt.Errorf("Unable to convert message event to message model: %v", err))
 			return
@@ -1071,7 +1120,6 @@ func (ch *ChatUiView) handleSendClicked() {
 	}
 
 	deviceJID := ch.parent.GetDeviceJID()
-	chatJID := ch.chat.ChatJID
 	if deviceJID == nil {
 		fmt.Printf("DeviceJID empty when trying to send message\n")
 		ch.parent.QueueMessage(ChatListView, nil)
@@ -1079,16 +1127,17 @@ func (ch *ChatUiView) handleSendClicked() {
 	}
 
 	ch.newTaskWithTimeout(30 * time.Second)
-
-	ch.send.SetLabel("Sending...")
-	ch.composeText.SetEditable(false)
 	context.AfterFunc(ch.ctx, func() {
 		ch.finishPendingMessage()
 	})
 
+	ch.send.SetLabel("Sending...")
+	ch.composeText.SetEditable(false)
+
 	msgText := strings.Clone(ch.composeText.Text())
 	fmt.Printf("Send event: %s\n", msgText)
 
+	chatJID := ch.chat.ChatJID
 	msgModel := models.NewPendingMessage("Pending", chatJID, *deviceJID, "Me", msgText, models.MessageTypeText, nil)
 	pending := NewMessageRowUi(ch.parent, &msgModel, ch.messageLoaded)
 
@@ -1123,6 +1172,7 @@ func (ch *ChatUiView) finishPendingMessage() {
 		ch.parent.QueueMessage(ErrorView, fmt.Errorf("Pending message %s should be at end of chat, but was not!"))
 		return
 	}
+
 	ch.messageRows = ch.messageRows[:len(ch.messageRows)-2]
 	ch.messageList.Remove(ch.messagePending)
 
@@ -1133,17 +1183,42 @@ func (ch *ChatUiView) sendPendingMessage(ctx context.Context, cancel context.Can
 	defer cancel()
 
 	if ch.messagePending == nil {
-		// TODO: error
+		fmt.Printf("Error sending message: No pending message row\n")
 		return
 	}
 	pending := ch.messagePending
+	if pending.message != msg {
+		fmt.Printf("Error sending message: Pending message row model does not match passed message\n")
+		return
+	}
+
+	fmt.Println("Sending message...")
 	message := waE2E.Message{
 		Conversation: &msg.Message,
 	}
-	sendReq, err := ch.parent.GetChatClient().SendMessage(ctx, ch.chat.ChatJID, &message)
+	client := ch.parent.GetChatClient()
+	sendReq, err := client.SendMessage(ctx, ch.chat.ChatJID, &message)
 	if err == nil {
+		deviceJID := ch.parent.GetDeviceJID()
+
 		pending.message.ID = sendReq.ID
 		pending.message.Timestamp = sendReq.Timestamp
+		pending.message.ChatJID = msg.ChatJID
+		pending.message.SenderJID = *deviceJID
+
+		dbMsg := msg.IntoDbMessage(deviceJID)
+		if err := dbMsg.SaveMessageData(); err != nil {
+			fmt.Printf("Error saving message data: %s", err.Error())
+			return
+		}
+
+		// Update our chat database with the message
+		chatDB := ch.parent.GetChatDB()
+		if err := chatDB.Message.Put(ctx, *deviceJID, ch.chat.ChatJID, []*db.Message{&dbMsg}); err != nil {
+			fmt.Printf("Error updating message database: %s", err.Error())
+			return
+		}
+
 		fmt.Printf("Sent message\n")
 	} else {
 		fmt.Printf("Error sending message: %s\n", err.Error())

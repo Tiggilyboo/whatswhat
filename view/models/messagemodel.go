@@ -6,10 +6,10 @@ import (
 	"time"
 
 	"github.com/dustin/go-humanize"
+	"github.com/tiggilyboo/whatswhat/db"
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/types"
-	"go.mau.fi/whatsmeow/types/events"
 	"golang.org/x/text/cases"
 	"golang.org/x/text/language"
 )
@@ -42,7 +42,7 @@ type MessageModel struct {
 	MsgType      MessageType
 	Message      string
 	Unread       bool
-	ContextInfo  *waE2E.ContextInfo
+	RawMessage   *waE2E.Message
 }
 
 type MediaMessage interface {
@@ -123,6 +123,11 @@ func (model *MessageModel) populateMessage(client *whatsmeow.Client, chatJID typ
 			}
 		}
 
+	case msg.ReactionMessage != nil:
+		model.MsgType = MessageTypeReference
+		model.Message = msg.ReactionMessage.GetText()
+		model.ReferencesID = msg.ReactionMessage.Key.ID
+
 	case msg.TemplateMessage != nil:
 		tplMsg := msg.GetTemplateMessage()
 		tpl := tplMsg.GetHydratedTemplate()
@@ -190,13 +195,11 @@ func (model *MessageModel) populateMessage(client *whatsmeow.Client, chatJID typ
 		model.MsgType = MessageTypeLocation
 		lmsg := msg.LocationMessage
 		model.Message = fmt.Sprintf("(%f, %f) %s\n%s\n%s\n%s", lmsg.GetDegreesLatitude(), lmsg.GetDegreesLongitude(), lmsg.GetName(), lmsg.GetAddress(), lmsg.GetURL(), lmsg.GetComment())
-		model.ContextInfo = lmsg.ContextInfo
 
 	case msg.LiveLocationMessage != nil:
 		model.MsgType = MessageTypeLocation
 		lmsg := msg.LocationMessage
 		model.Message = fmt.Sprintf("(%f, %f) %s\n%s\n%s\n%s", lmsg.GetDegreesLatitude(), lmsg.GetDegreesLongitude(), lmsg.GetName(), lmsg.GetAddress(), lmsg.GetURL(), lmsg.GetComment())
-		model.ContextInfo = lmsg.ContextInfo
 
 	case msg.AssociatedChildMessage != nil:
 		model.populateMessage(client, chatJID, msg.AssociatedChildMessage.Message)
@@ -230,32 +233,34 @@ func (model *MessageModel) populateMessage(client *whatsmeow.Client, chatJID typ
 	return nil
 }
 
-func GetMessageModel(client *whatsmeow.Client, chatJID types.JID, msg *events.Message) (*MessageModel, error) {
-	info := msg.Info
-	if info.Timestamp.IsZero() {
+func GetMessageModel(client *whatsmeow.Client, chatJID types.JID, msg *db.Message) (*MessageModel, error) {
+	if msg.Timestamp.IsZero() {
 		return nil, fmt.Errorf("GetMessageModel: timestamp zero")
 	}
 	model := MessageModel{
-		ID:        info.ID,
-		ChatJID:   info.Chat,
-		SenderJID: info.Sender,
-		PushName:  info.PushName,
-		IsFromMe:  info.IsFromMe,
-		IsGroup:   info.IsGroup,
-		Timestamp: info.Timestamp,
-		MsgType:   MessageTypeUnknown,
+		ID:         msg.MessageID,
+		ChatJID:    msg.ChatJID,
+		SenderJID:  msg.SenderJID,
+		PushName:   msg.PushName,
+		IsFromMe:   msg.SenderJID == msg.DeviceJID.ToNonAD(),
+		IsGroup:    msg.SenderJID == types.GroupServerJID,
+		Timestamp:  msg.Timestamp,
+		RawMessage: msg.Message,
+		MsgType:    MessageTypeUnknown,
 	}
-	if client.Store.ID.User == info.Sender.User {
+	if model.IsFromMe {
 		model.PushName = "Me"
+	}
+	if msg.MessageData != nil {
+		if err := msg.LoadMessage(); err != nil {
+			return nil, fmt.Errorf("GetMessageModel LoadMessage: %s", err.Error())
+		}
+		fmt.Printf("LoadMessage from message data %s: %v\n", msg.MessageID, msg.Message)
 	}
 
 	emsg := msg.Message
-	if emsg == nil {
-		emsg = msg.SourceWebMsg.GetMessage()
-	}
-
 	if err := model.populateMessage(client, chatJID, emsg); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("GetMessageModel populateMessage: %s", err.Error())
 	}
 
 	return &model, nil
@@ -263,7 +268,6 @@ func GetMessageModel(client *whatsmeow.Client, chatJID types.JID, msg *events.Me
 
 func (mm *MessageModel) convertMediaMessage(rawMsg MediaMessage) {
 	mm.Media = rawMsg
-	mm.ContextInfo = rawMsg.GetContextInfo()
 
 	switch rawMsg.(type) {
 	case *waE2E.ImageMessage:
@@ -295,13 +299,22 @@ func (mm *MessageModel) convertRawTextToMarkup(msg *waE2E.Message) {
 	} else {
 		mm.Message = msg.GetConversation()
 	}
-	mm.ContextInfo = msg.GetExtendedTextMessage().GetContextInfo()
 
-	fmt.Printf("Converting raw text to markup: %s", mm.Message)
-
+	//fmt.Printf("Converting raw text to markup: %s", mm.Message)
 	// Replace links with html
 	mm.Message = urlRegex.ReplaceAllStringFunc(mm.Message, func(match string) string {
 		return fmt.Sprintf(`<a href="%s">%s</a>`, match, match)
 	})
-	fmt.Printf(" to: %s\n", mm.Message)
+	//fmt.Printf(" to: %s\n", mm.Message)
+}
+
+func (mm *MessageModel) IntoDbMessage(deviceJID *types.JID) db.Message {
+	return db.Message{
+		DeviceJID: *deviceJID,
+		ChatJID:   mm.ChatJID,
+		SenderJID: mm.SenderJID,
+		MessageID: mm.ID,
+		Timestamp: mm.Timestamp,
+		Message:   mm.RawMessage,
+	}
 }

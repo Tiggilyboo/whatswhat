@@ -25,7 +25,7 @@ CREATE TABLE whatsapp_history_sync_message (
     message_id    TEXT   NOT NULL,
     timestamp     BIGINT NOT NULL,
     data          bytea  NOT NULL,
-    inserted_time BIGINT NOT NULL,
+    push_name     TEXT   NOT NULL,
 
     PRIMARY KEY (device_jid, chat_jid, sender_jid, message_id),
     CONSTRAINT whatsapp_history_sync_message_conversation_fkey FOREIGN KEY (device_jid, chat_jid)

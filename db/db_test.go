@@ -91,11 +91,11 @@ func ConversationQueryPut(t *testing.T) {
 		t.Error(err)
 	}
 
-	tuple := make([]*db.HistorySyncMessageTuple, len(testDbMessages))
+	tuple := make([]*db.Message, len(testDbMessages))
 	for i, _ := range testDbConvo.GetMessages() {
-		tupleItem := db.HistorySyncMessageTuple{
-			Info:    nil,
-			Message: make([]byte, 122),
+		tupleItem := db.Message{
+			MessageID:   "FakeMessageID",
+			MessageData: make([]byte, 122),
 		}
 		tuple[i] = &tupleItem
 	}
