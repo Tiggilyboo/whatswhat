@@ -37,7 +37,7 @@ func parseHistoryTime(ts *uint64) time.Time {
 	return time.Unix(int64(*ts), 0)
 }
 
-func NewConversation(deviceJID types.JID, chatJID types.JID, conv *waHistorySync.Conversation) *Conversation {
+func NewConversation(deviceJID types.JID, chatJID types.JID, fallbackChatName string, conv *waHistorySync.Conversation) *Conversation {
 	var pinned *bool
 	if conv.Pinned != nil {
 		pinned = ptr.Ptr(*conv.Pinned > 0)
@@ -50,7 +50,7 @@ func NewConversation(deviceJID types.JID, chatJID types.JID, conv *waHistorySync
 	} else if conv.Username != nil {
 		convoName = conv.GetUsername()
 	} else {
-		convoName = chatJID.User
+		convoName = fallbackChatName
 	}
 	return &Conversation{
 		DeviceJID:                 deviceJID,

@@ -113,10 +113,14 @@ func (pv *ProfileUiView) Update(msg *UiMessage) (Response, error) {
 			return ResponsePushView, fmt.Errorf("Unexpected profile message payload: %s", msg.Payload)
 		}
 	}
+	if msg.Intent == ResponseIgnore || msg.Intent == ResponseBackView {
+		return msg.Intent, nil
+	}
 
 	ctx, payloadCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	go pv.getProfilePayload(ctx, payloadCancel, userJID)
 
+	fmt.Println("ProfileUiView.Update: Done, intent: %s", msg.Intent)
 	return msg.Intent, nil
 }
 

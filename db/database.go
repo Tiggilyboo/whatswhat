@@ -10,6 +10,7 @@ type Database struct {
 	*dbutil.Database
 	Conversation *ConversationQuery
 	Message      *MessageQuery
+	PushName     *PushNameQuery
 }
 
 func New(db *dbutil.Database, log zerolog.Logger) *Database {
@@ -23,6 +24,9 @@ func New(db *dbutil.Database, log zerolog.Logger) *Database {
 			}),
 		},
 		Message: &MessageQuery{
+			Database: db,
+		},
+		PushName: &PushNameQuery{
 			Database: db,
 		},
 	}

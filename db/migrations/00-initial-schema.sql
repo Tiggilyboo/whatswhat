@@ -25,10 +25,16 @@ CREATE TABLE whatsapp_history_sync_message (
     message_id    TEXT   NOT NULL,
     timestamp     BIGINT NOT NULL,
     data          bytea  NOT NULL,
-    push_name     TEXT   NOT NULL,
 
     PRIMARY KEY (device_jid, chat_jid, sender_jid, message_id),
     CONSTRAINT whatsapp_history_sync_message_conversation_fkey FOREIGN KEY (device_jid, chat_jid)
     REFERENCES whatsapp_history_sync_conversation (device_jid, chat_jid) ON UPDATE CASCADE ON DELETE CASCADE
 );
 
+CREATE TABLE whatsapp_history_sync_pushname (
+    device_jid   TEXT NOT NULL,
+    jid          TEXT NOT NULL,
+    name         TEXT NOT NULL,
+
+    PRIMARY KEY (device_jid, jid)
+);

@@ -108,17 +108,25 @@ func (ci *chatItemRow) Update(ctx context.Context, model *models.ConversationMod
 	chatDb := ci.parent.GetChatDB()
 	client := ci.parent.GetChatClient()
 	deviceJID := client.Store.ID
+	pushNames, err := ci.parent.GetPushNames()
+	if err != nil {
+		pushNames = make(map[types.JID]*db.PushName, 0)
+	}
 
 	mostRecentMessages, err := chatDb.Message.GetBetween(ctx, *deviceJID, model.ChatJID, nil, nil, 1)
 	if err != nil {
 		fmt.Printf("Unable to load last message for: %s", model.ChatJID)
-		mostRecentMessages = make([]db.Message, 0)
+		mostRecentMessages = make([]*db.Message, 0)
 	}
 
 	var lastMessageText *string
 	var lastMessageTimestamp *time.Time
 	if len(mostRecentMessages) > 0 {
-		messageModel, err := models.GetMessageModel(client, model.ChatJID, &mostRecentMessages[0])
+		pushName := mostRecentMessages[0].SenderJID.User
+		if dbPushName, ok := pushNames[mostRecentMessages[0].SenderJID.ToNonAD()]; ok {
+			pushName = dbPushName.Name
+		}
+		messageModel, err := models.GetMessageModel(client, pushName, mostRecentMessages[0])
 		if err == nil {
 			lastMessageTrimmed := fmt.Sprintf("%.*s", 35, messageModel.Message)
 			lastMessageText = &lastMessageTrimmed

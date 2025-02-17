@@ -167,7 +167,7 @@ func NewMessageRowUi(parent UiParent, message *models.MessageModel, loadedChan c
 		pushNames, err := parent.GetPushNames()
 		if err == nil {
 			if pushName, ok := pushNames[message.SenderJID]; ok {
-				senderText = pushName
+				senderText = pushName.Name
 			}
 		}
 		if len(senderText) == 0 {
@@ -865,6 +865,12 @@ func (ch *ChatUiView) LoadMessages(startTimestamp *time.Time, endTimestamp *time
 		return
 	}
 
+	pushNames, err := ch.parent.GetPushNames()
+	if err != nil {
+		ch.parent.QueueMessage(ErrorView, err)
+		return
+	}
+
 	messages, err := chatDB.Message.GetBetween(ch.ctx, *deviceJID, chatJID, startTimestamp, endTimestamp, limit)
 	if err != nil {
 		ch.parent.QueueMessage(ErrorView, err)
@@ -881,14 +887,24 @@ func (ch *ChatUiView) LoadMessages(startTimestamp *time.Time, endTimestamp *time
 		return
 	} else if lenMessages == 0 && lenOrig == 0 {
 		ch.statusRow.SetStatus("No messages")
+		return
 	}
 
 	// Convert messages to models
 	msgModels := make([]*models.MessageModel, lenMessages)
 	for i, message := range messages {
+		if message.Timestamp().IsZero() {
+			fmt.Printf("Found zero timestamp at %d: %v\n", lenMessages-i-1, message)
+		}
+
+		pushName := message.SenderJID.User
+		dbPushName, ok := pushNames[message.SenderJID.ToNonAD()]
+		if ok {
+			pushName = dbPushName.Name
+		}
 
 		// convert to UI model
-		model, err := models.GetMessageModel(client, chatJID, &message)
+		model, err := models.GetMessageModel(client, pushName, message)
 		if err != nil {
 			ch.parent.QueueMessage(ErrorView, fmt.Errorf("Unable to convert message event to message model: %v", err))
 			return

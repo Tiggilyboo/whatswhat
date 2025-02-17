@@ -56,7 +56,7 @@ type UiParent interface {
 	GetChatClient() *whatsmeow.Client
 	GetChatDB() *db.Database
 	GetContacts() (map[types.JID]types.ContactInfo, error)
-	GetPushNames() (map[types.JID]string, error)
+	GetPushNames() (map[types.JID]*db.PushName, error)
 	GetDeviceJID() *types.JID
 	GetWindowSize() (int, int)
 	RequestHistory(chatJID types.JID, count int, ctx context.Context, feedback chan RequestInfo)

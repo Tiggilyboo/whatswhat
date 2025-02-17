@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/tiggilyboo/whatswhat/db"
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/types"
 )
@@ -23,16 +24,23 @@ type ConversationModel struct {
 	LastMessageTimestamp time.Time
 }
 
-func resolveMember(client *whatsmeow.Client, contacts map[types.JID]types.ContactInfo, pushNames map[types.JID]string, contactJID types.JID) ConversationMemberModel {
+func resolveMember(client *whatsmeow.Client, contacts map[types.JID]types.ContactInfo, pushNames map[types.JID]*db.PushName, contactJID types.JID) ConversationMemberModel {
 	nonAdJid := contactJID.ToNonAD()
 	var member *ConversationMemberModel
 
-	if pushName, ok := pushNames[nonAdJid]; ok {
+	if contactJID == *client.Store.ID {
 		member = &ConversationMemberModel{
 			JID:       contactJID,
-			FirstName: pushName,
-			FullName:  pushName,
-			PushName:  pushName,
+			FirstName: client.Store.PushName,
+			FullName:  client.Store.PushName,
+			PushName:  client.Store.PushName,
+		}
+	} else if pushName, ok := pushNames[nonAdJid]; ok {
+		member = &ConversationMemberModel{
+			JID:       contactJID,
+			FirstName: pushName.Name,
+			FullName:  pushName.Name,
+			PushName:  pushName.Name,
 		}
 	} else {
 		otherContact, ok := contacts[nonAdJid]
@@ -61,7 +69,7 @@ func resolveMember(client *whatsmeow.Client, contacts map[types.JID]types.Contac
 	return *member
 }
 
-func GetConversationModel(client *whatsmeow.Client, contacts map[types.JID]types.ContactInfo, pushNames map[types.JID]string, chatJID types.JID, chatName string, unread uint, lastMessageTime time.Time, detailed bool) (*ConversationModel, error) {
+func GetConversationModel(client *whatsmeow.Client, contacts map[types.JID]types.ContactInfo, pushNames map[types.JID]*db.PushName, chatJID types.JID, chatName string, unread uint, lastMessageTime time.Time, detailed bool) (*ConversationModel, error) {
 	var members []ConversationMemberModel
 	switch chatJID.Server {
 	case types.DefaultUserServer:

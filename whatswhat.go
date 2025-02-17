@@ -43,7 +43,7 @@ type WhatsWhatApp struct {
 	chatDB           *db.Database
 	notifier         *services.NotificationService
 	contacts         map[types.JID]types.ContactInfo
-	pushNames        map[types.JID]string
+	pushNames        map[types.JID]*db.PushName
 	viewChan         chan view.UiMessage
 	ctx              context.Context
 	connected        bool
@@ -182,12 +182,28 @@ func (ww *WhatsWhatApp) GetContacts() (map[types.JID]types.ContactInfo, error) {
 	return contacts, nil
 }
 
-func (ww *WhatsWhatApp) GetPushNames() (map[types.JID]string, error) {
+func (ww *WhatsWhatApp) GetPushNames() (map[types.JID]*db.PushName, error) {
 	if ww.pushNames != nil {
 		return ww.pushNames, nil
 	}
+	if ww.GetDeviceJID() == nil {
+		return nil, fmt.Errorf("Unable to get push names, logged out")
+	}
 
-	return nil, fmt.Errorf("PushName data has not been sent in last history sync")
+	// No push names loaded yet
+	if ww.chatDB == nil {
+		return nil, fmt.Errorf("Unable to get push names, chatDB not initialized")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	pushNames, err := ww.chatDB.PushName.Get(ctx, *ww.GetDeviceJID())
+	if err != nil {
+		return nil, err
+	}
+
+	fmt.Printf("Loaded %d pushnames from database\n", len(pushNames))
+	return pushNames, nil
 }
 
 func (ww *WhatsWhatApp) RequestHistory(chatJID types.JID, count int, ctx context.Context, feedback chan view.RequestInfo) {
@@ -391,10 +407,18 @@ func (ww *WhatsWhatApp) handleConnectedState(connected bool) {
 		}
 		fmt.Println("loaded ", len(contacts), " contacts")
 		ww.contacts = contacts
-		ww.pushNames = make(map[types.JID]string)
+		ww.pushNames, err = ww.GetPushNames()
+		if err != nil {
+			fmt.Println("Unable to get PushNames, some contacts may have missing names: ", err.Error())
+			ww.pushNames = make(map[types.JID]*wwdb.PushName)
+		}
+		fmt.Println("loaded ", len(ww.pushNames), " pushnames")
 
 		ww.profile.SetVisible(true)
 	} else {
+		// Disconnected, clear contacts and pushName cache
+		ww.pushNames = nil
+		ww.contacts = nil
 		ww.profile.SetVisible(false)
 	}
 }
@@ -405,7 +429,7 @@ func (ww *WhatsWhatApp) queueMessageNotification(evt *events.Message) {
 		ww.QueueMessage(view.ErrorView, err)
 		return
 	}
-	msgModel, err := models.GetMessageModel(ww.client, evt.Info.Chat, dbMsg)
+	msgModel, err := models.GetMessageModel(ww.client, evt.Info.PushName, dbMsg)
 	if err != nil {
 		ww.QueueMessage(view.ErrorView, err)
 		return
@@ -614,6 +638,8 @@ func (ww *WhatsWhatApp) handleHistorySync(evt *events.HistorySync) {
 	addedMessages := 0
 
 	deviceID := ww.client.Store.ID
+	pushNameArr := make([]*db.PushName, len(evt.Data.Pushnames))
+	pnCount := 0
 	for _, pn := range evt.Data.Pushnames {
 		if pn == nil || pn.ID == nil || pn.Pushname == nil {
 			continue
@@ -623,7 +649,20 @@ func (ww *WhatsWhatApp) handleHistorySync(evt *events.HistorySync) {
 			fmt.Printf("Unable to parse pushname: %v\n", pn)
 			continue
 		}
-		ww.pushNames[pnID] = *pn.Pushname
+		dbPn := db.PushName{
+			JID:  pnID,
+			Name: *pn.Pushname,
+		}
+		ww.pushNames[pnID] = &dbPn
+		pushNameArr[pnCount] = &dbPn
+		pnCount++
+	}
+	if pnCount > 0 {
+		err := ww.chatDB.PushName.Put(ctx, *deviceID, pushNameArr)
+		if err != nil {
+			ww.QueueMessage(view.ErrorView, fmt.Errorf("Unable to update pushnames: %s", err.Error()))
+			return
+		}
 	}
 
 	for _, convo := range evt.Data.Conversations {
@@ -695,8 +734,13 @@ func (ww *WhatsWhatApp) handleHistorySync(evt *events.HistorySync) {
 		convo.LastMsgTimestamp = &lastMsgUnixTs
 
 		if len(messages) > 0 {
-			// Convo timestamp is the last message
-			dbConvo := wwdb.NewConversation(*deviceID, chatJID, convo)
+			fallbackChatName := chatJID.User
+			fallbackPushName, ok := ww.pushNames[chatJID]
+			if ok {
+				fallbackChatName = fallbackPushName.Name
+			}
+
+			dbConvo := wwdb.NewConversation(*deviceID, chatJID, fallbackChatName, convo)
 			if err := ww.chatDB.Conversation.Put(ctx, *deviceID, dbConvo); err != nil {
 				failedToSaveConversations += 1
 				fmt.Printf("Unable to save conversation metadata: %s\n", err)

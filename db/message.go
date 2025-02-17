@@ -19,12 +19,12 @@ type MessageQuery struct {
 
 const (
 	insertMessageQuery = `
-		INSERT INTO whatsapp_history_sync_message (device_jid, chat_jid, sender_jid, message_id, timestamp, push_name, data)
-		VALUES ($1, $2, $3, $4, $5, $6, $7)
+		INSERT INTO whatsapp_history_sync_message (device_jid, chat_jid, sender_jid, message_id, timestamp, data)
+		VALUES ($1, $2, $3, $4, $5, $6)
 		ON CONFLICT (device_jid, chat_jid, sender_jid, message_id) DO NOTHING
 	`
 	getMessagesBetweenQueryTemplate = `
-		SELECT message_id, sender_jid, timestamp, push_name, data FROM whatsapp_history_sync_message
+		SELECT message_id, sender_jid, timestamp, data FROM whatsapp_history_sync_message
 		WHERE device_jid=$1 AND chat_jid=$2
 			%s
 		ORDER BY timestamp DESC
@@ -48,47 +48,71 @@ const (
 )
 
 type Message struct {
-	DeviceJID   types.JID
-	ChatJID     types.JID
-	SenderJID   types.JID
-	MessageID   types.MessageID
-	Timestamp   time.Time
-	PushName    string
-	MessageData []byte
-	Message     *waE2E.Message
+	DeviceJID     types.JID
+	ChatJID       types.JID
+	SenderJID     types.JID
+	MessageID     types.MessageID
+	UnixTimestamp *int64
+	MessageData   []byte
+	Message       *waE2E.Message
 }
 
 func NewMessageFromEvent(deviceJID types.JID, evt *events.Message) (*Message, error) {
 	if evt.Message == nil {
 		return nil, fmt.Errorf("Event message is nil")
 	}
+	if evt.Info.Timestamp.IsZero() {
+		return nil, fmt.Errorf("Event message timestamp is nil")
+	}
+	ts := evt.Info.Timestamp.Unix()
 	return &Message{
-		DeviceJID: deviceJID,
-		ChatJID:   evt.Info.Chat,
-		SenderJID: evt.Info.Sender.ToNonAD(),
-		MessageID: evt.Info.ID,
-		PushName:  evt.Info.PushName,
-		Timestamp: evt.Info.Timestamp,
-		Message:   evt.Message,
+		DeviceJID:     deviceJID,
+		ChatJID:       evt.Info.Chat,
+		SenderJID:     evt.Info.Sender.ToNonAD(),
+		MessageID:     evt.Info.ID,
+		UnixTimestamp: &ts,
+		Message:       evt.Message,
 	}, nil
 }
 
-func (m *Message) GetMassInsertValues() [5]any {
+func (m *Message) Timestamp() time.Time {
+	if m.UnixTimestamp == nil {
+		return time.Time{}
+	}
+	return time.Unix(*m.UnixTimestamp, 0)
+}
+
+func (m *Message) GetMassInsertValues() [4]any {
 	if m.MessageData == nil && m.Message != nil {
 		err := m.SaveMessageData()
 		if err != nil {
 			fmt.Printf("Error saving message %s data: %v", m.MessageID, m.MessageData)
 		}
 	}
-	return [5]any{m.SenderJID.ToNonAD(), m.MessageID, m.Timestamp.Unix(), m.PushName, m.MessageData}
+	return [4]any{m.SenderJID.ToNonAD(), m.MessageID, m.UnixTimestamp, m.MessageData}
 }
 
 var batchInsertMessage = dbutil.NewMassInsertBuilder[*Message, [2]any](
-	insertMessageQuery, "($1, $2, $%d, $%d, $%d, $%d, $%d)",
+	insertMessageQuery, "($1, $2, $%d, $%d, $%d, $%d)",
 )
 
 func (m *Message) LoadMessage() error {
-	return proto.Unmarshal(m.MessageData, m.Message)
+	if m.MessageData == nil {
+		return fmt.Errorf("nil message data")
+	}
+	if len(m.MessageData) == 0 {
+		m.Message = &waE2E.Message{}
+		return nil
+	}
+
+	fmt.Printf("Unmarshalling %d bytes into message...", len(m.MessageData))
+	msg := waE2E.Message{}
+	err := proto.Unmarshal(m.MessageData, &msg)
+	if err != nil {
+		return err
+	}
+	m.Message = &msg
+	return nil
 }
 
 func (m *Message) SaveMessageData() error {
@@ -115,14 +139,9 @@ func (mq *MessageQuery) Put(ctx context.Context, deviceJID types.JID, chatJID ty
 }
 
 func (m *Message) Scan(row dbutil.Scannable) (*Message, error) {
-	var timestampUnix int64
-	err := row.Scan(&m.MessageID, &m.SenderJID, &timestampUnix, &m.PushName, &m.MessageData)
+	err := row.Scan(&m.MessageID, &m.SenderJID, &m.UnixTimestamp, &m.MessageData)
 	if err != nil {
 		return nil, fmt.Errorf("Unable to scan row: %s", err.Error())
-	}
-	m.Timestamp = time.Unix(timestampUnix, 0)
-	if m.Timestamp.IsZero() {
-		return nil, fmt.Errorf("Zero timestamp: %s", m.MessageID)
 	}
 	if m.MessageData == nil {
 		return nil, fmt.Errorf("Unable to load message data: %s", m.MessageID)
@@ -131,7 +150,7 @@ func (m *Message) Scan(row dbutil.Scannable) (*Message, error) {
 	return m, nil
 }
 
-func (mq *MessageQuery) GetBetween(ctx context.Context, deviceJID types.JID, chatJID types.JID, startTime, endTime *time.Time, limit int) ([]Message, error) {
+func (mq *MessageQuery) GetBetween(ctx context.Context, deviceJID types.JID, chatJID types.JID, startTime, endTime *time.Time, limit int) ([]*Message, error) {
 	whereClauses := ""
 	args := []any{deviceJID, chatJID}
 	argNum := 3
@@ -160,13 +179,9 @@ func (mq *MessageQuery) GetBetween(ctx context.Context, deviceJID types.JID, cha
 	}
 	defer rows.Close()
 
-	more := true
 	count := 0
-	messages := make([]Message, limit)
+	messages := make([]*Message, limit)
 	for rows.Next() {
-		if !more {
-			break
-		}
 		message := Message{}
 		message.DeviceJID = deviceJID
 		message.ChatJID = chatJID
@@ -174,6 +189,7 @@ func (mq *MessageQuery) GetBetween(ctx context.Context, deviceJID types.JID, cha
 			return nil, fmt.Errorf("Scan error: %s", err.Error())
 		}
 
+		messages[count] = &message
 		count++
 	}
 	messages = messages[:count]

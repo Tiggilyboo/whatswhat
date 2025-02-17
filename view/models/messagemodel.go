@@ -233,18 +233,19 @@ func (model *MessageModel) populateMessage(client *whatsmeow.Client, chatJID typ
 	return nil
 }
 
-func GetMessageModel(client *whatsmeow.Client, chatJID types.JID, msg *db.Message) (*MessageModel, error) {
-	if msg.Timestamp.IsZero() {
+func GetMessageModel(client *whatsmeow.Client, pushName string, msg *db.Message) (*MessageModel, error) {
+	timestamp := msg.Timestamp()
+	if timestamp.IsZero() {
 		return nil, fmt.Errorf("GetMessageModel: timestamp zero")
 	}
 	model := MessageModel{
 		ID:         msg.MessageID,
 		ChatJID:    msg.ChatJID,
 		SenderJID:  msg.SenderJID,
-		PushName:   msg.PushName,
+		PushName:   pushName,
 		IsFromMe:   msg.SenderJID == msg.DeviceJID.ToNonAD(),
 		IsGroup:    msg.SenderJID == types.GroupServerJID,
-		Timestamp:  msg.Timestamp,
+		Timestamp:  timestamp,
 		RawMessage: msg.Message,
 		MsgType:    MessageTypeUnknown,
 	}
@@ -258,8 +259,7 @@ func GetMessageModel(client *whatsmeow.Client, chatJID types.JID, msg *db.Messag
 		fmt.Printf("LoadMessage from message data %s: %v\n", msg.MessageID, msg.Message)
 	}
 
-	emsg := msg.Message
-	if err := model.populateMessage(client, chatJID, emsg); err != nil {
+	if err := model.populateMessage(client, msg.ChatJID, msg.Message); err != nil {
 		return nil, fmt.Errorf("GetMessageModel populateMessage: %s", err.Error())
 	}
 
@@ -309,12 +309,13 @@ func (mm *MessageModel) convertRawTextToMarkup(msg *waE2E.Message) {
 }
 
 func (mm *MessageModel) IntoDbMessage(deviceJID *types.JID) db.Message {
+	ts := mm.Timestamp.Unix()
 	return db.Message{
-		DeviceJID: *deviceJID,
-		ChatJID:   mm.ChatJID,
-		SenderJID: mm.SenderJID,
-		MessageID: mm.ID,
-		Timestamp: mm.Timestamp,
-		Message:   mm.RawMessage,
+		DeviceJID:     *deviceJID,
+		ChatJID:       mm.ChatJID,
+		SenderJID:     mm.SenderJID,
+		MessageID:     mm.ID,
+		UnixTimestamp: &ts,
+		Message:       mm.RawMessage,
 	}
 }
