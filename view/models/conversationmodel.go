@@ -24,7 +24,7 @@ type ConversationModel struct {
 	LastMessageTimestamp time.Time
 }
 
-func resolveMember(client *whatsmeow.Client, contacts map[types.JID]types.ContactInfo, pushNames map[types.JID]*db.PushName, contactJID types.JID) ConversationMemberModel {
+func ResolveMember(client *whatsmeow.Client, contacts map[types.JID]types.ContactInfo, pushNames map[types.JID]*db.PushName, contactJID types.JID) ConversationMemberModel {
 	nonAdJid := contactJID.ToNonAD()
 	var member *ConversationMemberModel
 
@@ -45,8 +45,12 @@ func resolveMember(client *whatsmeow.Client, contacts map[types.JID]types.Contac
 	} else {
 		otherContact, ok := contacts[nonAdJid]
 		if !ok {
-			otherContact, _ = client.Store.Contacts.GetContact(nonAdJid)
-			ok = true
+			var err error
+			otherContact, err = client.Store.Contacts.GetContact(nonAdJid)
+			if err == nil {
+				contacts[nonAdJid] = otherContact
+				ok = true
+			}
 		}
 		if ok {
 			member = &ConversationMemberModel{
@@ -62,7 +66,8 @@ func resolveMember(client *whatsmeow.Client, contacts map[types.JID]types.Contac
 		member = &ConversationMemberModel{
 			JID:       contactJID,
 			FirstName: contactJID.User,
-			FullName:  contactJID.Server,
+			FullName:  contactJID.User,
+			PushName:  contactJID.User,
 		}
 	}
 
@@ -75,8 +80,8 @@ func GetConversationModel(client *whatsmeow.Client, contacts map[types.JID]types
 	case types.DefaultUserServer:
 		if detailed {
 			members = make([]ConversationMemberModel, 2)
-			members[0] = resolveMember(client, contacts, pushNames, chatJID)
-			members[1] = resolveMember(client, contacts, pushNames, *client.Store.ID)
+			members[0] = ResolveMember(client, contacts, pushNames, chatJID)
+			members[1] = ResolveMember(client, contacts, pushNames, *client.Store.ID)
 		}
 	case types.NewsletterServer:
 		if detailed {
@@ -98,7 +103,7 @@ func GetConversationModel(client *whatsmeow.Client, contacts map[types.JID]types
 			members := make([]ConversationMemberModel, len(info.Participants))
 			groupParticipants := info.Participants
 			for i, p := range groupParticipants {
-				members[i] = resolveMember(client, contacts, pushNames, p.JID)
+				members[i] = ResolveMember(client, contacts, pushNames, p.JID)
 			}
 		}
 

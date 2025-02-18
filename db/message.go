@@ -83,7 +83,7 @@ func (m *Message) Timestamp() time.Time {
 }
 
 func (m *Message) GetMassInsertValues() [4]any {
-	if m.MessageData == nil && m.Message != nil {
+	if m.Message != nil && m.MessageData == nil {
 		err := m.SaveMessageData()
 		if err != nil {
 			fmt.Printf("Error saving message %s data: %v", m.MessageID, m.MessageData)
@@ -105,7 +105,7 @@ func (m *Message) LoadMessage() error {
 		return nil
 	}
 
-	fmt.Printf("Unmarshalling %d bytes into message...", len(m.MessageData))
+	//fmt.Printf("Unmarshalling %d bytes into message...", len(m.MessageData))
 	msg := waE2E.Message{}
 	err := proto.Unmarshal(m.MessageData, &msg)
 	if err != nil {
@@ -116,11 +116,17 @@ func (m *Message) LoadMessage() error {
 }
 
 func (m *Message) SaveMessageData() error {
+	if m.Message == nil {
+		return fmt.Errorf("SaveMessageData: message is nil %v", m.MessageID)
+	}
+
 	bytes, err := proto.Marshal(m.Message)
 	if err != nil {
 		return err
 	}
 	m.MessageData = bytes
+
+	fmt.Printf("DBMessage.SaveMessageData: %v\n", m.MessageData)
 	return nil
 }
 
@@ -128,10 +134,14 @@ func (mq *MessageQuery) Put(ctx context.Context, deviceJID types.JID, chatJID ty
 	return mq.DoTxn(ctx, nil, func(ctx context.Context) error {
 		for _, chunk := range exslices.Chunk(messages, 50) {
 			query, params := batchInsertMessage.Build([2]any{deviceJID, chatJID}, chunk)
-			_, err := mq.Exec(ctx, query, params...)
+			fmt.Printf("Query: %s\nParams: %v", query, params)
+			result, err := mq.Exec(ctx, query, params...)
 			if err != nil {
 				fmt.Printf("Unable to execute: %s\nErr: %s", query, err.Error())
 				return err
+			}
+			if count, err := result.RowsAffected(); err != nil {
+				fmt.Printf("Inserted %d\n", count)
 			}
 		}
 		return nil

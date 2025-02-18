@@ -251,7 +251,7 @@ func (ch *ChatListUiView) Close() {
 }
 
 func (ch *ChatListUiView) Title() string {
-	return "WhatsWhat - Conversations"
+	return "Chats"
 }
 
 func (ch *ChatListUiView) handleChatSelected(row *gtk.ListBoxRow) {

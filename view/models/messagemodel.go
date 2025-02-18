@@ -10,6 +10,7 @@ import (
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/types"
+	"go.mau.fi/whatsmeow/types/events"
 	"golang.org/x/text/cases"
 	"golang.org/x/text/language"
 )
@@ -25,6 +26,8 @@ const (
 	MessageTypeAudio
 	MessageTypeVideo
 	MessageTypeDocument
+	MessageTypeRevoke
+	MessageTypeEdit
 )
 
 var urlRegex = regexp.MustCompile(`(https?://[^\s<>"'()]+)`)
@@ -105,6 +108,37 @@ func (m *MessageModel) MediaSize() *string {
 	bytes := m.Media.GetFileLength()
 	mediaSize := humanize.Bytes(bytes)
 	return &mediaSize
+}
+
+func MessageShouldBeParsed(msg *waE2E.Message) bool {
+	switch {
+	case msg == nil:
+		return false
+	case msg.ProtocolMessage != nil:
+		switch msg.GetProtocolMessage().GetType() {
+		case waE2E.ProtocolMessage_REVOKE:
+			if msg.GetProtocolMessage().GetKey() == nil {
+				return false
+			}
+		case waE2E.ProtocolMessage_HISTORY_SYNC_NOTIFICATION,
+			waE2E.ProtocolMessage_APP_STATE_SYNC_KEY_SHARE,
+			waE2E.ProtocolMessage_INITIAL_SECURITY_NOTIFICATION_SETTING_SYNC:
+			return false
+		}
+	case msg.EncEventResponseMessage != nil:
+		return false
+
+	case msg.SenderKeyDistributionMessage != nil,
+		msg.StickerSyncRmrMessage != nil:
+		return false
+	}
+
+	return true
+}
+
+func MessageEventShouldBeParsed(evt *events.Message) bool {
+	return MessageShouldBeParsed(evt.Message) ||
+		MessageShouldBeParsed(evt.RawMessage)
 }
 
 func (model *MessageModel) populateMessage(client *whatsmeow.Client, chatJID types.JID, msg *waE2E.Message) error {
@@ -222,6 +256,7 @@ func (model *MessageModel) populateMessage(client *whatsmeow.Client, chatJID typ
 		model.convertMediaMessage(msg.PtvMessage)
 	case msg.DocumentMessage != nil:
 		model.convertMediaMessage(msg.DocumentMessage)
+
 	default:
 		return fmt.Errorf("Error parsing: %v", msg)
 	}

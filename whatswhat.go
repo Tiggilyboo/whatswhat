@@ -434,10 +434,21 @@ func (ww *WhatsWhatApp) queueMessageNotification(evt *events.Message) {
 		ww.QueueMessage(view.ErrorView, err)
 		return
 	}
+	title := msgModel.PushName
+	if evt.Info.Chat.Server == types.GroupServer {
+		// TODO: Cache names?
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		conversation, err := ww.chatDB.Conversation.Get(ctx, *ww.GetDeviceJID(), evt.Info.Chat)
+		if err == nil {
+			title = fmt.Sprintf("%s - %s", conversation.Name, msgModel.PushName)
+		}
+	}
+
 	id := ww.notifier.NextNotificationID()
 	notification := services.Notification{
 		ID:            id,
-		Summary:       msgModel.PushName,
+		Summary:       title,
 		Body:          msgModel.Message,
 		Icon:          "mail-unread",
 		ExpirySeconds: 0,
@@ -480,6 +491,10 @@ func (ww *WhatsWhatApp) queueUnreadChatNotification(convo *waHistorySync.Convers
 }
 
 func (ww *WhatsWhatApp) handleMessage(evt *events.Message) {
+	if !models.MessageEventShouldBeParsed(evt) {
+		return
+	}
+
 	deviceJID := ww.client.Store.ID
 	existingChat, err := ww.chatDB.Conversation.Get(ww.ctx, *deviceJID, evt.Info.Chat)
 	if err != nil {
